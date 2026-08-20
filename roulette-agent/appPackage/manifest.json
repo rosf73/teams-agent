@@ -1,0 +1,79 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.29",
+  "version": "1.0.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "Example Org",
+    "websiteUrl": "https://www.example.com",
+    "privacyUrl": "https://www.example.com/privacy",
+    "termsOfUseUrl": "https://www.example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "당첨자뽑기${{APP_NAME_SUFFIX}}",
+    "full": "당첨자뽑기 (랜덤 추첨 봇)"
+  },
+  "description": {
+    "short": "채팅방에서 참여자 중 당첨자를 긴장감 있게 추첨합니다.",
+    "full": "봇을 태그하고 후보들을 함께 태그하면, 한 명씩 호출하며 두구두구 연출과 함께 결과를 공개합니다. 뽑을 인원 수를 함께 적으면 그 수만큼 추첨합니다. 추첨 난수는 암호학적 난수 생성기를 사용합니다."
+  },
+  "accentColor": "#FFFFFF",
+  "supportsChannelFeatures": "tier1",
+  "bots": [
+    {
+      "botId": "${{BOT_ID}}",
+      "scopes": [
+        "groupChat",
+        "team",
+        "personal"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "supportsTargetedMessages": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "groupChat",
+            "team"
+          ],
+          "triggers": [
+            "mention"
+          ],
+          "commands": [
+            {
+              "title": "@당첨자뽑기 @홍길동 @김철수 2명",
+              "description": "후보들을 태그하고 뽑을 인원 수를 적으면 그 수만큼 추첨합니다."
+            },
+            {
+              "title": "@당첨자뽑기 @홍길동 @김철수 @이영희",
+              "description": "인원 수를 생략하면 1명을 추첨합니다."
+            }
+          ]
+        },
+        {
+          "scopes": [
+            "personal"
+          ],
+          "commands": [
+            {
+              "title": "도움말",
+              "description": "당첨자뽑기 사용법을 안내합니다."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "composeExtensions": [],
+  "configurableTabs": [],
+  "staticTabs": [],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": []
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.29",
+  "version": "1.0.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "Example Org",
+    "websiteUrl": "https://www.example.com",
+    "privacyUrl": "https://www.example.com/privacy",
+    "termsOfUseUrl": "https://www.example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "투표만들기${{APP_NAME_SUFFIX}}",
+    "full": "투표만들기 (실시간 투표 봇)"
+  },
+  "description": {
+    "short": "채팅방에서 실시간으로 집계되는 투표를 만듭니다.",
+    "full": "제목과 항목, 마감 시각, 복수 선택 여부를 지정해 투표를 만듭니다. 누군가 투표하면 카드가 즉시 갱신되어 채팅방 전원이 현재 집계와 각 항목의 투표자 이름을 함께 볼 수 있습니다."
+  },
+  "accentColor": "#FFFFFF",
+  "supportsChannelFeatures": "tier1",
+  "bots": [
+    {
+      "botId": "${{BOT_ID}}",
+      "scopes": [
+        "groupChat",
+        "team",
+        "personal"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "supportsTargetedMessages": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "groupChat",
+            "team"
+          ],
+          "triggers": [
+            "mention"
+          ],
+          "commands": [
+            {
+              "title": "@투표만들기",
+              "description": "생성 폼을 띄웁니다. 제목·항목·마감·복수선택을 입력합니다."
+            },
+            {
+              "title": "@투표만들기 회식 / 삼겹살, 치킨",
+              "description": "한 줄로 만들기: 제목 / 항목1, 항목2 / 마감 / 복수 (뒤 두 개는 생략 가능)"
+            }
+          ]
+        },
+        {
+          "scopes": [
+            "personal"
+          ],
+          "commands": [
+            {
+              "title": "도움말",
+              "description": "투표만들기 사용법을 안내합니다."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "composeExtensions": [],
+  "configurableTabs": [],
+  "staticTabs": [],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": []
+}

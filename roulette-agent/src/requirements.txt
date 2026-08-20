@@ -1,0 +1,10 @@
+# 현재 안정 버전은 2.0.15 이다.
+microsoft-teams-apps>=2.0.15,<3.0.0
+
+# 투표 카드용 (Card / TextBlock / ExecuteAction 등 빌더).
+microsoft-teams-cards>=2.0.15,<3.0.0
+
+# 주의: PyPI 의 `dotenv` 는 "Deprecated package" 이고 python-dotenv 를 재포장한 것이다.
+# 게다가 microsoft-teams-apps 가 이미 python-dotenv 를 끌어오므로 원래 없어도 된다.
+# 의도를 명시하기 위해 직접 적어 둔다.
+python-dotenv>=1.0.0
