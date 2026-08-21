@@ -265,17 +265,44 @@ for a in roulette-agent vote-agent; do [ -f $a/src/.env ] || cp $a/src/.env.exam
 
 ### 4-3. 실행 (터미널 3개)
 
+각각 별도 터미널에서. 스크립트가 **이전 프로세스를 정리한 뒤** 띄운다.
+
 ```bash
-cd ~/dev/ms-teams-agent && devtunnel host "$(devtunnel list | grep -Eo 'teams-agents\.[a-z0-9]+' | head -1)"
+cd ~/dev/ms-teams-agent && ./scripts/startHost
 ```
 
 ```bash
-cd ~/dev/ms-teams-agent/roulette-agent/src && ../../.venv/bin/python app.py
+cd ~/dev/ms-teams-agent && ./scripts/startRoulette
 ```
 
 ```bash
-cd ~/dev/ms-teams-agent/vote-agent/src && ../../.venv/bin/python app.py
+cd ~/dev/ms-teams-agent && ./scripts/startVote
 ```
+
+터미널을 셋 다 열기 귀찮으면 `--bg` 를 붙인다. `logs/` 에 기록되고 셸을 닫아도 살아 있다.
+
+```bash
+cd ~/dev/ms-teams-agent && ./scripts/startHost --bg && ./scripts/startRoulette --bg && ./scripts/startVote --bg
+```
+
+```bash
+tail -f ~/dev/ms-teams-agent/logs/*.log
+```
+
+각 스크립트가 하는 일:
+
+| | 정리 | 확인 | 실행 |
+|---|---|---|---|
+| `startHost` | 기존 `devtunnel` 프로세스 | 바이너리 위치, 터널 ID(리전 접미사 포함), 포트 URL 출력 | `devtunnel host` |
+| `startRoulette` | 포트 3978 점유 프로세스 | venv, `.env` 존재 | roulette-agent |
+| `startVote` | 포트 3979 점유 프로세스 | venv, `.env` 존재 | vote-agent (기동 시 보존정책 정리) |
+
+**종료 방식** — `TERM` 을 먼저 보내고 1.5초 안에 안 죽으면 **`KILL -9`** 로 확실히 끝낸다.
+uvicorn 이 `asyncio.sleep` 중일 때 `TERM` 을 늦게(또는 아예) 처리하지 않아 프로세스가
+살아남는 일이 반복됐기 때문이다. 포트를 실제로 비운 것까지 확인하고 나서 새로 띄운다.
+
+`-9` 가 안전한 이유: vote-agent 는 SQLite 트랜잭션마다 커밋하므로 중간 상태가 남지 않고,
+roulette-agent 는 아무것도 저장하지 않는다.
 
 ### 4-4. 터널 도달 확인 (Teams 전에)
 
@@ -375,7 +402,7 @@ kill -9 $(lsof -t -nP -iTCP:3978 -sTCP:LISTEN)
 포트가 빈 것을 확인한 뒤 재실행:
 
 ```bash
-cd ~/dev/ms-teams-agent/roulette-agent/src && ../../.venv/bin/python app.py
+cd ~/dev/ms-teams-agent && ./scripts/startRoulette
 ```
 
 작업 디렉터리는 어디든 된다. `load_dotenv()` 가 `config.py` 위치를 기준으로 `.env` 를 찾으므로

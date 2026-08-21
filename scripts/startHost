@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Dev Tunnel 호스트를 (재)시작한다.
+#
+#   ./scripts/startHost          포그라운드 (Ctrl+C 로 종료)
+#   ./scripts/startHost --bg     백그라운드 (logs/host.log)
+#
+# 터널이 죽으면 봇이 로컬에서 살아 있어도 Teams 요청이 도달하지 못한다.
+# 아무 오류도 안 뜨고 봇만 무응답이 되므로 원인을 찾기 어렵다.
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+parse_args "$@"
+
+echo "▸ devtunnel 정리"
+stop_tunnel
+
+BIN="$(devtunnel_bin)" || die "devtunnel 을 찾지 못했다.
+   curl -sL https://aka.ms/DevTunnelCliInstall | bash"
+say "· 바이너리: $BIN"
+
+TID="$(resolve_tunnel_id "$BIN")"
+if [ -z "$TID" ]; then
+    die "'$TUNNEL_NAME' 터널이 없다. 현재 목록:
+$("$BIN" list 2>&1 | sed 's|^|     |')
+   만들려면: devtunnel user login && devtunnel create $TUNNEL_NAME -a
+             devtunnel port create <ID> -p 3978 --protocol http
+             devtunnel port create <ID> -p 3979 --protocol http"
+fi
+say "· 터널 ID: $TID"
+
+echo "▸ 엔드포인트 (봇 등록에 설정된 값과 같아야 한다)"
+"$BIN" show "$TID" 2>/dev/null | grep -E '^\s+[0-9]{4}\s' | sed 's|^|  |'
+echo
+
+run_or_background host "$BG" "$BIN" host "$TID"

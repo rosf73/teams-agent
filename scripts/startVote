@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# vote-agent(@투표만들기)를 (재)시작한다. 포트 3979.
+#
+#   ./scripts/startVote          포그라운드 (Ctrl+C 로 종료)
+#   ./scripts/startVote --bg     백그라운드 (logs/vote.log)
+#
+# 기동할 때 보존 기간이 지난 투표를 정리한다 (기본: 마감 후 1일, 방치 30일).
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+parse_args "$@"
+PORT=3979
+
+require_venv
+require_env vote-agent
+
+echo "▸ 포트 $PORT 정리"
+stop_port "$PORT"
+echo
+
+cd "$ROOT/vote-agent/src" || die "vote-agent/src 로 이동 실패"
+run_or_background vote "$BG" "$PYTHON" app.py

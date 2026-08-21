@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# roulette-agent(@당첨자뽑기)를 (재)시작한다. 포트 3978.
+#
+#   ./scripts/startRoulette          포그라운드 (Ctrl+C 로 종료)
+#   ./scripts/startRoulette --bg     백그라운드 (logs/roulette.log)
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+parse_args "$@"
+PORT=3978
+
+require_venv
+require_env roulette-agent
+
+echo "▸ 포트 $PORT 정리"
+stop_port "$PORT"
+echo
+
+cd "$ROOT/roulette-agent/src" || die "roulette-agent/src 로 이동 실패"
+run_or_background roulette "$BG" "$PYTHON" app.py
