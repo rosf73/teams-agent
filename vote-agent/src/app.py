@@ -13,6 +13,7 @@ LLM 을 쓰지 않는다. 마감 표현은 정규식으로 해석하고, 애매�
 """
 
 import asyncio
+import hashlib
 import logging
 from collections import OrderedDict
 
@@ -73,6 +74,25 @@ def _lock(poll_id: str) -> asyncio.Lock:
     return _locks.setdefault(poll_id, asyncio.Lock())
 
 
+def _who(user_id: str) -> str:
+    """로그용 익명 식별자.
+
+    실명을 로그에 남기면 클라우드의 로그 저장소(App Service 로그 스트림,
+    Log Analytics 등)로 개인정보가 퍼져 나가고 보존 기간도 우리 통제 밖이다.
+    같은 사람인지 구분할 수 있으면 디버깅에는 충분하다.
+    """
+    return hashlib.sha256(user_id.encode()).hexdigest()[:8]
+
+
+def _forget(poll_id: str) -> None:
+    """끝난 투표의 프로세스 내 상태를 버린다.
+
+    `_locks` 는 투표마다 하나씩 쌓이므로 오래 돌리면 계속 늘어난다.
+    """
+    _locks.pop(poll_id, None)
+    _timers.pop(poll_id, None)
+
+
 def _ack(text: str) -> AdaptiveCardActionMessageResponse:
     """클릭한 사람에게만 보이는 짧은 확인. 채팅방에 메시지를 남기지 않는다."""
     return AdaptiveCardActionMessageResponse(
@@ -111,6 +131,7 @@ def _schedule_close(ctx, poll: Poll) -> None:
                     if fresh:
                         await _repaint(ctx, fresh)
                         logger.info("마감 (타이머) poll=%s", poll.id)
+            _forget(poll.id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -243,7 +264,8 @@ async def handle_vote(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
         fresh = store.get_poll(poll_id) or poll
         await _repaint(ctx, fresh)
 
-    logger.info("투표 poll=%s idx=%s user=%s → %s", poll_id, option_idx, voter_name, message)
+    # 실명 대신 익명 해시를 남긴다.
+    logger.info("투표 poll=%s idx=%s user=%s", poll_id, option_idx, _who(voter_id))
     return _ack(message)
 
 
@@ -270,13 +292,19 @@ async def handle_close(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     timer = _timers.pop(poll_id, None)
     if timer:
         timer.cancel()
+    _forget(poll_id)
     logger.info("마감 (수동) poll=%s", poll_id)
     return _ack("투표를 마감했습니다.")
 
 
 if __name__ == "__main__":
     logger.info("%s 기동 — 포트 %s · DB %s", config.AGENT_NAME, config.PORT, store.path)
-    open_count = len(store.open_polls())
-    if open_count:
-        logger.info("진행 중인 투표 %d건 — 상호작용 시 마감 시각을 검사한다", open_count)
+
+    # 보존 기간이 지난 투표를 정리한다. 실명과 사용자 id 가 들어 있으므로
+    # 필요 이상으로 들고 있지 않는다.
+    purged_closed, purged_stale = store.purge_old()
+    if purged_closed or purged_stale:
+        logger.info("보존정책 정리 — 마감 %d건, 방치 %d건 삭제", purged_closed, purged_stale)
+    logger.info("DB 현황 %s", store.counts())
+
     asyncio.run(app.start())

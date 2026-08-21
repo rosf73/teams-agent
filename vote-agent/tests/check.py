@@ -277,6 +277,41 @@ def test_store() -> None:
         multi_select=False, closes_at=datetime.now(timezone.utc) - timedelta(minutes=1))
     check("지난 마감 시각 감지", store.get_poll(expiring.id).is_expired())
 
+    section("보존정책 — 오래된 투표 자동 삭제")
+    import store as store_mod
+    ret = Store(":memory:")
+    old = ret.create_poll(conversation_id="c", service_url=None, creator_id="29:x",
+                          creator_name="x", title="오래된 마감", options=["a", "b"],
+                          multi_select=False, closes_at=None)
+    ret.toggle_vote(ret.get_poll(old.id), 0, "29:v", "이름있는사람")
+    ret.close_poll(old.id, at=datetime.now(timezone.utc) - timedelta(days=3))
+    recent = ret.create_poll(conversation_id="c", service_url=None, creator_id="29:x",
+                             creator_name="x", title="방금 마감", options=["a", "b"],
+                             multi_select=False, closes_at=None)
+    ret.close_poll(recent.id)
+    live = ret.create_poll(conversation_id="c", service_url=None, creator_id="29:x",
+                           creator_name="x", title="진행 중", options=["a", "b"],
+                           multi_select=False, closes_at=None)
+    closed_n, stale_n = ret.purge_old(closed_days=1, open_days=30)
+    check("보존 기간 지난 마감분만 삭제", (closed_n, stale_n) == (1, 0), f"{closed_n}/{stale_n}")
+    check("오래된 투표가 사라짐", ret.get_poll(old.id) is None)
+    check("방금 마감분은 남음", ret.get_poll(recent.id) is not None)
+    check("진행 중은 남음", ret.get_poll(live.id) is not None)
+    check("표(실명 포함)도 CASCADE 로 함께 삭제",
+          ret.counts()["votes"] == 0, str(ret.counts()))
+
+    stale = ret.create_poll(conversation_id="c", service_url=None, creator_id="29:x",
+                            creator_name="x", title="방치", options=["a", "b"],
+                            multi_select=False, closes_at=None)
+    ret._conn.execute("UPDATE polls SET created_at = ? WHERE id = ?",
+                      ((datetime.now(timezone.utc) - timedelta(days=60)).isoformat(), stale.id))
+    ret._conn.commit()
+    closed_n, stale_n = ret.purge_old(closed_days=1, open_days=30)
+    check("마감 안 된 방치 투표도 정리", (closed_n, stale_n) == (0, 1), f"{closed_n}/{stale_n}")
+    check("counts() 는 실명·식별자를 반환하지 않음",
+          set(ret.counts()) == {"polls", "open", "votes"}, str(ret.counts()))
+    ret.close()
+
     section("동표 처리")
     tie = store.create_poll(
         conversation_id=CONVERSATION, service_url=None, creator_id="29:x", creator_name="x",
@@ -549,6 +584,122 @@ async def test_handler() -> None:
     check("카드를 만들지 않음", not ctx9.cards())
 
 
+async def test_concurrency() -> None:
+    """동시 투표·동시 생성·여러 대화방."""
+    import app
+
+    section("동시성 — 같은 투표에 20명이 동시 클릭")
+    poll = app.store.create_poll(
+        conversation_id="19:room-a", service_url=SERVICE_URL,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="동시 투표", options=["A", "B"], multi_select=False, closes_at=None)
+    app.store.set_activity_id(poll.id, "card-conc")
+    board = cards.poll_card(app.store.get_poll(poll.id))
+
+    def voter_invoke(i: int, option: int):
+        act = invoke_from_card(board, option, reply_to="card-conc")
+        act.from_.id = f"29:u{i}"
+        act.from_.name = f"사람{i}"
+        act.id = f"inv-conc-{i}-{option}"
+        return act
+
+    ctxs = [FakeContext(voter_invoke(i, i % 2)) for i in range(20)]
+    await asyncio.gather(*(route(app, c) for c in ctxs))
+
+    fresh = app.store.get_poll(poll.id)
+    check("표가 하나도 유실되지 않음 (20표)", fresh.total_votes == 20,
+          f"{fresh.total_votes}표 / A={fresh.options[0].count} B={fresh.options[1].count}")
+    check("A 10표 · B 10표 정확", fresh.options[0].count == 10 and fresh.options[1].count == 10)
+    check("참여자 20명 (중복 집계 없음)", fresh.voter_count == 20, f"{fresh.voter_count}명")
+
+    # 락이 갱신 순서를 지켜야 한다. 마지막 갱신 카드가 최종 DB 상태와 일치해야 한다.
+    last_card = [m for c in ctxs for k, _, m in c.calls if k == "UPDATE"][-1]
+    final_text = card_text(last_card.attachments[0].content)
+    check("마지막 갱신 카드가 최종 상태와 일치",
+          "**10표**" in final_text and final_text.count("**10표**") == 2, final_text[:80])
+
+    section("개인정보 — 로그에 실명이 나가지 않는가")
+    hashed = app._who(PEOPLE["owner"][0])
+    check("사용자 id 를 8자 해시로 익명화", len(hashed) == 8 and hashed.isalnum(), hashed)
+    check("해시가 실명·원본 id 를 담지 않음",
+          PEOPLE["owner"][1] not in hashed and PEOPLE["owner"][0] not in hashed)
+    check("같은 사용자는 같은 해시 (추적 가능)",
+          app._who(PEOPLE["owner"][0]) == hashed)
+    check("다른 사용자는 다른 해시", app._who(PEOPLE["alice"][0]) != hashed)
+
+    section("동시성 — 같은 사람이 같은 항목을 20번 연타")
+    spam = app.store.create_poll(
+        conversation_id="19:room-a", service_url=SERVICE_URL,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="연타", options=["A", "B"], multi_select=False, closes_at=None)
+    app.store.set_activity_id(spam.id, "card-spam")
+    spam_board = cards.poll_card(app.store.get_poll(spam.id))
+    spam_ctxs = []
+    for i in range(20):
+        act = invoke_from_card(spam_board, 0, who="alice", reply_to="card-spam")
+        act.id = f"inv-spam-{i}"
+        spam_ctxs.append(FakeContext(act))
+    await asyncio.gather(*(route(app, c) for c in spam_ctxs))
+    after = app.store.get_poll(spam.id)
+    # 짝수 번 토글이면 0표, 홀수면 1표. 어느 쪽이든 1명을 넘을 수 없다.
+    check("연타해도 1표를 넘지 않음", after.total_votes in (0, 1),
+          f"{after.total_votes}표")
+    check("PK 제약으로 중복 행이 안 생김", after.voter_count <= 1, f"{after.voter_count}명")
+
+    section("동시성 — 여러 대화방에서 동시 생성 + 동시 투표")
+    creates = []
+    for r in range(5):
+        ctx = FakeContext(message(f"방{r} / A, B", who="owner"))
+        ctx.activity.conversation.id = f"19:multi-{r}"
+        creates.append(ctx)
+    await asyncio.gather(*(app.handle_message(c) for c in creates))
+    ids = [action_data(c.cards()[0].actions[0]).get("p") for c in creates]
+    check("5개 대화방에 각각 별도 투표 생성", len(set(ids)) == 5, f"{len(set(ids))}개")
+    check("대화방 id 가 정확히 기록됨",
+          all(app.store.get_poll(pid).conversation_id == f"19:multi-{i}"
+              for i, pid in enumerate(ids)))
+    for pid in ids:
+        if pid in app._timers:
+            app._timers[pid].cancel()
+
+    # 각 방에서 3명씩 동시 투표
+    vote_ctxs = []
+    for r, pid in enumerate(ids):
+        b = cards.poll_card(app.store.get_poll(pid))
+        for u in range(3):
+            act = invoke_from_card(b, u % 2, reply_to=app.store.get_poll(pid).activity_id or "x")
+            act.from_.id = f"29:m{r}-{u}"
+            act.from_.name = f"방{r}사람{u}"
+            act.id = f"inv-multi-{r}-{u}"
+            vote_ctxs.append((pid, FakeContext(act)))
+    await asyncio.gather(*(route(app, c) for _, c in vote_ctxs))
+    counts = {pid: app.store.get_poll(pid).total_votes for pid in ids}
+    check("방마다 정확히 3표", all(v == 3 for v in counts.values()), str(counts))
+    check("방끼리 표가 섞이지 않음",
+          all(app.store.get_poll(pid).voter_count == 3 for pid in ids))
+
+    section("동시성 — 투표와 마감이 동시에")
+    race = app.store.create_poll(
+        conversation_id="19:race", service_url=SERVICE_URL,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="경합", options=["A", "B"], multi_select=False, closes_at=None)
+    app.store.set_activity_id(race.id, "card-race")
+    rb = cards.poll_card(app.store.get_poll(race.id))
+    close_act = invoke_from_card(rb, 2, who="owner", reply_to="card-race")
+    close_act.id = "inv-race-close"
+    vote_acts = []
+    for i in range(5):
+        a = invoke_from_card(rb, 0, reply_to="card-race")
+        a.from_.id = f"29:r{i}"; a.from_.name = f"경합{i}"; a.id = f"inv-race-v{i}"
+        vote_acts.append(FakeContext(a))
+    await asyncio.gather(route(app, FakeContext(close_act)),
+                         *(route(app, c) for c in vote_acts))
+    r = app.store.get_poll(race.id)
+    check("마감이 정확히 한 번만 적용", r.closed and r.closed_at is not None)
+    check("마감 후 들어온 표는 기록되지 않음 (표 ≤ 5)", r.total_votes <= 5, f"{r.total_votes}표")
+    check("마감 카드가 최종 상태", not cards.poll_card(r).actions)
+
+
 async def test_timer() -> None:
     import app
     section("마감 타이머 (실제 시계)")
@@ -577,6 +728,7 @@ async def main() -> int:
     test_cards()
     await test_routing()
     await test_handler()
+    await test_concurrency()
     await test_timer()
     print(f"\n{'=' * 62}\n통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
     for name in FAIL:

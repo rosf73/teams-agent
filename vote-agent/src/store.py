@@ -13,7 +13,18 @@ import os
 import secrets
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# 보존 기간. 투표에는 **실명과 AAD 사용자 id, 누가 무엇에 투표했는지**가 들어간다.
+# 필요 이상으로 오래 들고 있을 이유가 없다.
+#
+# 마감 후 하루면 충분하다 — 채팅방의 마감 카드는 그냥 메시지라 DB 없이도 계속 보인다.
+# 버튼도 사라져 있으므로 다시 그릴 일이 없다. 하루를 두는 건 마감 시점 갱신이
+# 네트워크 오류로 실패했을 때 복구할 여유를 남기기 위한 것이다.
+CLOSED_RETENTION_DAYS = float(os.environ.get("VOTE_CLOSED_RETENTION_DAYS", "1"))
+
+# 아무도 마감하지 않고 방치된 투표. 마감 시각이 없으면 영원히 열려 있게 된다.
+OPEN_RETENTION_DAYS = float(os.environ.get("VOTE_OPEN_RETENTION_DAYS", "30"))
 
 DB_PATH = os.environ.get(
     "VOTE_DB_PATH",
@@ -210,6 +221,39 @@ class Store:
                 (poll.id, option_idx, user_id, user_name, _iso(now())))
         moved = (not poll.multi_select) and bool(chosen)
         return f"'{label}' 으로 변경했습니다." if moved else f"'{label}' 에 투표했습니다."
+
+    # ── 보존정책 ──────────────────────────────────────────────────
+    def purge_old(self, *, closed_days: float = CLOSED_RETENTION_DAYS,
+                  open_days: float = OPEN_RETENTION_DAYS,
+                  at: datetime | None = None) -> tuple[int, int]:
+        """오래된 투표를 지운다. 반환: (마감분 삭제 수, 방치분 삭제 수).
+
+        `poll_options` 와 `votes` 는 `ON DELETE CASCADE` 로 함께 사라진다
+        (`PRAGMA foreign_keys = ON` 이 켜져 있어야 동작한다 — __init__ 에서 켠다).
+
+        시각 비교는 문자열 비교다. `_iso()` 가 항상 UTC 로 정규화하므로
+        사전순 비교가 시간순 비교와 일치한다.
+        """
+        current = at or now()
+        closed_cut = _iso(current - timedelta(days=closed_days))
+        open_cut = _iso(current - timedelta(days=open_days))
+        with self._conn:
+            closed = self._conn.execute(
+                "DELETE FROM polls WHERE closed_at IS NOT NULL AND closed_at < ?",
+                (closed_cut,)).rowcount
+            stale = self._conn.execute(
+                "DELETE FROM polls WHERE closed_at IS NULL AND created_at < ?",
+                (open_cut,)).rowcount
+        return closed, stale
+
+    def counts(self) -> dict[str, int]:
+        """운영 확인용. 실명·식별자는 반환하지 않는다."""
+        q = lambda sql: self._conn.execute(sql).fetchone()[0]
+        return {
+            "polls": q("SELECT COUNT(*) FROM polls"),
+            "open": q("SELECT COUNT(*) FROM polls WHERE closed_at IS NULL"),
+            "votes": q("SELECT COUNT(*) FROM votes"),
+        }
 
     # ── 마감 ──────────────────────────────────────────────────────
     def close_poll(self, poll_id: str, at: datetime | None = None) -> bool:

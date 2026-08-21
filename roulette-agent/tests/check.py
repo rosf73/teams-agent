@@ -361,6 +361,66 @@ async def _handler_cases(app) -> None:
           and "채팅방 전원" not in "\n".join(ctx.texts()))
 
 
+async def test_concurrency() -> None:
+    """같은/다른 대화방에서 동시에 태그했을 때."""
+    import app
+
+    section("동시성 — 같은 대화방에서 5명이 동시에 태그")
+    with fast_delays():
+        act_template = lambda i: activity(
+            "<at>당첨자뽑기</at> " + " ".join(f"<at>{m.name}</at>" for m in ROSTER[:4]) + " 1명",
+            [mention("당첨자뽑기", BOT.id)]
+            + [mention(m.name, m.id) for m in ROSTER[:4]],
+            conversation_id="19:same-room")
+        contexts = [FakeContext(act_template(i)) for i in range(5)]
+        await asyncio.gather(*(app.handle_message(c) for c in contexts))
+        await wait_idle(app)
+
+    ran = [c for c in contexts if any("🎲" in (m.text or "") or "🥁" in (m.text or "")
+                                      for _, _, m in c.calls)]
+    rejected = [c for c in contexts if any("이미 추첨이 진행 중" in (m.text or "")
+                                           for _, _, m in c.calls)]
+    check("동시 5건 중 정확히 1건만 진행", len(ran) == 1, f"진행 {len(ran)}건")
+    check("나머지 4건은 '진행 중' 거절", len(rejected) == 4, f"거절 {len(rejected)}건")
+    sends = sum(1 for c in contexts for _, k, _ in c.calls if k == "SEND")
+    per = [sum(1 for _, k, _ in c.calls if k == "SEND") for c in contexts]
+    check("연출이 겹쳐 돌지 않음 (판 1개 + 거절 4개)", sends == 5,
+          f"SEND 총 {sends}건, 컨텍스트별 {per}")
+    check("종료 후 락이 해제됨", "19:same-room" not in app._running)
+
+    section("동시성 — 다른 대화방 5곳에서 동시에")
+    with fast_delays():
+        contexts = []
+        for i in range(5):
+            act = activity(
+                "<at>당첨자뽑기</at> " + " ".join(f"<at>{m.name}</at>" for m in ROSTER[:4]) + " 1명",
+                [mention("당첨자뽑기", BOT.id)] + [mention(m.name, m.id) for m in ROSTER[:4]],
+                conversation_id=f"19:room{i}")
+            contexts.append(FakeContext(act))
+        await asyncio.gather(*(app.handle_message(c) for c in contexts))
+        await wait_idle(app)
+
+    finished = [c for c in contexts
+                if any("🎯 **당첨**" in (m.text or "") for _, _, m in c.calls)]
+    check("5개 대화방 모두 독립적으로 완주", len(finished) == 5, f"완주 {len(finished)}건")
+    check("대화방별 결과가 섞이지 않음",
+          all(len({m.text for _, _, m in c.calls if "🎯 **당첨**" in (m.text or "")}) == 1
+              for c in finished))
+    check("모든 락 해제됨", not app._running, f"{app._running}")
+
+    section("동시성 — 같은 activity 가 동시에 두 번 도착 (재전송)")
+    with fast_delays():
+        act = activity("<at>당첨자뽑기</at> " + " ".join(f"<at>{m.name}</at>" for m in ROSTER[:3]),
+                       [mention("당첨자뽑기", BOT.id)]
+                       + [mention(m.name, m.id) for m in ROSTER[:3]],
+                       activity_id="race", conversation_id="19:race")
+        c1, c2 = FakeContext(act), FakeContext(act)
+        await asyncio.gather(app.handle_message(c1), app.handle_message(c2))
+        await wait_idle(app)
+    check("동시 재전송 중 1건만 처리", (len(c1.calls) > 0) != (len(c2.calls) > 0),
+          f"{len(c1.calls)} / {len(c2.calls)}")
+
+
 async def test_timing() -> None:
     import app
     section("타이밍 (실제 시계)")
@@ -396,6 +456,7 @@ async def main() -> int:
     test_pure_logic()
     test_candidate_collection()
     await test_handler()
+    await test_concurrency()
     await test_timing()
     print(f"\n{'=' * 62}")
     print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
