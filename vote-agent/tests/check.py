@@ -207,24 +207,79 @@ def test_parsing() -> None:
         check(f"{base:%m/%d} 기준 {text!r} → {want or '거절'}", got == want,
               f"{got or err}")
 
-    section("한 줄 생성")
-    fields, err = P.parse_one_liner("회식장소 / 삼겹살, 치킨, 초밥 / 금요일 18시 / 복수")
-    check("제목·항목·마감·복수 해석",
-          bool(fields) and fields["title"] == "회식장소"
-          and fields["options"] == ["삼겹살", "치킨", "초밥"]
-          and fields["multi_select"] and fields["closes_at"] is not None)
-    check("`/` 없으면 시도 아님", P.parse_one_liner("그냥 텍스트") == (None, None))
-    for text, expect in [("회식 / 삼겹살", "2개 이상"), ("회식 / a, a", "중복"),
-                         (" / a, b", "제목"), ("회식 / a,b / 아무말", "이해하지 못")]:
-        _, err = P.parse_one_liner(text)
-        check(f"{text!r} 거절", err is not None and expect in err, err or "통과해버림")
-    _, err = P.parse_one_liner("회식 / " + ", ".join(f"o{i}" for i in range(P.MAX_OPTIONS + 1)))
-    check(f"항목 {P.MAX_OPTIONS}개 초과 거절", err is not None and "최대" in err, err or "")
+    section("요청 파싱 — 구분자를 쓰지 않는다")
+    # 사용자가 실제로 보고한 깨지던 케이스들
+    r = P.parse_request("9/10(목) 회식 메뉴 선정\n삼겹살\n치킨")
+    check("날짜가 든 제목(`/` 포함)이 그대로 유지",
+          not r.error and not r.needs_form and r.title == "9/10(목) 회식 메뉴 선정"
+          and r.options == ["삼겹살", "치킨"], f"{r.title!r} {r.options}")
+
+    r = P.parse_request(
+        "9/10(목) 회식 메뉴 선정\n"
+        "땡땡식당 (https://naver.me/GdymUOVY)\n"
+        "무슨식당 (https://naver.me/Fk738sTW)\n"
+        "마감: 금요일 18시\n복수")
+    check("항목에 링크(`//` 포함)를 넣을 수 있다",
+          r.options == ["땡땡식당 (https://naver.me/GdymUOVY)",
+                        "무슨식당 (https://naver.me/Fk738sTW)"], str(r.options))
+    check("링크가 있어도 마감·복수 지시어가 해석된다",
+          r.multi_select and r.closes_at is not None, f"복수={r.multi_select}")
+
+    r = P.parse_request("긴급! 회식 #3차 어디로?\n삼겹살\n치킨")
+    check("제목에 `!` `#` `?` 자유", r.title == "긴급! 회식 #3차 어디로?", r.title)
+
+    r = P.parse_request("매장 선택\n땡땡식당 (강남, 2호점)\n무슨식당 (역삼, 본점)")
+    check("항목 이름 안의 쉼표가 보존된다",
+          r.options == ["땡땡식당 (강남, 2호점)", "무슨식당 (역삼, 본점)"], str(r.options))
+
+    section("요청 파싱 — 줄바꿈 형태")
+    r = P.parse_request("회식<br>삼겹살<br>치킨<br>마감: 3시간")
+    check("Teams 가 `<br>` 로 보내도 처리 (textFormat=xml)",
+          r.options == ["삼겹살", "치킨"] and r.closes_at is not None, str(r.options))
+    r = P.parse_request("회식\r\n삼겹살\r\n치킨")
+    check("CRLF 처리", r.options == ["삼겹살", "치킨"], str(r.options))
+    r = P.parse_request("회식\n\n삼겹살\n\n\n치킨\n")
+    check("빈 줄 무시", r.options == ["삼겹살", "치킨"], str(r.options))
+
+    section("요청 파싱 — 안전한 강등 (파싱 위험 0)")
+    r = P.parse_request("9/10(목) 회식 메뉴 선정")
+    check("제목만 오면 폼을 제목 채워서 연다",
+          r.needs_form and r.title == "9/10(목) 회식 메뉴 선정" and not r.error, f"{r!r}")
+    r = P.parse_request("")
+    check("빈 입력은 빈 폼", r.needs_form and not r.title and not r.error)
+
+    section("요청 파싱 — 옛 `/` 문법 마이그레이션")
+    r = P.parse_request("회식장소 / 삼겹살, 치킨, 초밥 / 금요일 18시 / 복수")
+    check("옛 문법은 폼에 옮겨 담는다 (바로 만들지 않는다)", r.needs_form)
+    check("제목·항목·복수·마감이 폼에 채워진다",
+          r.title == "회식장소" and r.options == ["삼겹살", "치킨", "초밥"]
+          and r.multi_select and r.deadline_text == "금요일 18시",
+          f"{r.title!r} {r.options} 복수={r.multi_select} 마감={r.deadline_text!r}")
+    check("문법이 바뀐 것을 안내한다", r.note is not None and "줄바꿈" in (r.note or ""))
+    r = P.parse_request("9/10(목) 회식 메뉴 선정")
+    check("날짜 제목을 옛 문법으로 오해하지 않는다",
+          r.title == "9/10(목) 회식 메뉴 선정" and not r.options, f"{r.title!r} {r.options}")
+
+    section("요청 파싱 — 거절")
+    for text, expect in [("회식\n삼겹살", "2개 이상"),
+                         ("회식\n삼겹살\n삼겹살", "중복"),
+                         ("회식\n삼겹살\n치킨\n마감: 아무말", "이해하지 못"),
+                         ("회식\n" + "\n".join(f"o{i}" for i in range(P.MAX_OPTIONS + 1)), "최대")]:
+        r = P.parse_request(text)
+        check(f"{text[:24]!r} 거절", r.error is not None and expect in r.error,
+              r.error or "통과해버림")
+    r = P.parse_request("가" * (P.MAX_TITLE + 1) + "\n삼겹살\n치킨")
+    check("제목 길이 초과 거절", r.error is not None and "제목" in r.error, r.error or "")
 
     section("항목 블록 파싱")
     check("줄바꿈 구분", P.parse_options_block("삼겹살\n치킨\n초밥") == ["삼겹살", "치킨", "초밥"])
-    check("쉼표 구분", P.parse_options_block("삼겹살, 치킨") == ["삼겹살", "치킨"])
-    check("혼합 + 빈 줄 제거", P.parse_options_block("a\n\nb, c\n") == ["a", "b", "c"])
+    check("한 줄이면 쉼표로 구분", P.parse_options_block("삼겹살, 치킨") == ["삼겹살", "치킨"])
+    # 줄바꿈으로 나눈 목록을 다시 쉼표로 쪼개면 `(강남, 2호점)` 같은 이름이 깨진다
+    check("줄바꿈이 있으면 쉼표로 재분할하지 않는다",
+          P.parse_options_block("땡땡식당 (강남, 2호점)\n무슨식당 (역삼, 본점)")
+          == ["땡땡식당 (강남, 2호점)", "무슨식당 (역삼, 본점)"],
+          str(P.parse_options_block("땡땡식당 (강남, 2호점)\n무슨식당 (역삼, 본점)")))
+    check("`<br>` 도 줄바꿈으로", P.parse_options_block("a<br>b<br>c") == ["a", "b", "c"])
 
 
 def test_store() -> None:
@@ -458,19 +513,27 @@ async def test_routing() -> None:
 
     section("라우팅 — 메시지")
     check("@멘션 메시지 → 핸들러 매칭",
-          len(app.app.router.select_handlers(message("x / a, b"))) >= 1)
+          len(app.app.router.select_handlers(message("제목\n항목1\n항목2"))) >= 1)
 
 
 async def test_handler() -> None:
     import app
 
-    section("핸들러 — 한 줄 생성")
-    ctx = FakeContext(message("회식장소 / 삼겹살, 치킨, 초밥 / 3시간 / 복수"))
+    section("핸들러 — 줄바꿈으로 바로 생성")
+    ctx = FakeContext(message(
+        "9/10(목) 회식 메뉴 선정\n"
+        "땡땡식당 (https://naver.me/GdymUOVY)\n"
+        "무슨식당 (https://naver.me/Fk738sTW)\n"
+        "초밥집\n마감: 3시간\n복수"))
     await app.handle_message(ctx)
     check("메시지 1개 전송", len(ctx.calls) == 1 and ctx.calls[0][0] == "SEND")
     posted = ctx.cards()
     check("카드 1개 첨부", len(posted) == 1)
-    check("투표판이 바로 나옴", "회식장소" in card_text(posted[0]))
+    board_text = card_text(posted[0])
+    check("투표판이 바로 나옴", "9/10(목) 회식 메뉴 선정" in board_text, board_text[:60])
+    check("링크가 항목에 그대로 들어감",
+          "https://naver.me/GdymUOVY" in board_text)
+    check("`/` 가 든 제목이 깨지지 않음", "9/10(목)" in board_text)
     poll_id = action_data(posted[0].actions[0]).get("p")
     stored = app.store.get_poll(poll_id)
     check("DB 에 activity_id 저장", stored.activity_id == ctx.calls[0][1],
@@ -566,7 +629,7 @@ async def test_handler() -> None:
     check("표는 기록되지 않음", app.store.get_poll(expired.id).total_votes == 0)
 
     section("핸들러 — 재전송 방어")
-    act = message("중복 / a, b")
+    act = message("중복\n항목A\n항목B")
     c1 = FakeContext(act)
     await app.handle_message(c1)
     c2 = FakeContext(act)
@@ -576,12 +639,34 @@ async def test_handler() -> None:
     if dup_id in app._timers:
         app._timers[dup_id].cancel()
 
-    section("핸들러 — 잘못된 한 줄")
-    ctx9 = FakeContext(message("회식 / 하나만"))
+    section("핸들러 — 항목이 모자라면 안내")
+    ctx9 = FakeContext(message("회식\n하나만"))
     await app.handle_message(ctx9)
     check("오류 + 사용법 안내",
           "2개 이상" in ctx9.texts()[0] and "사용법" in ctx9.texts()[0])
     check("카드를 만들지 않음", not ctx9.cards())
+
+    section("핸들러 — 제목만 보내면 폼이 채워져 열린다")
+    ctx10 = FakeContext(message("9/10(목) 회식 메뉴 선정"))
+    await app.handle_message(ctx10)
+    form = ctx10.cards()[0]
+    values = {getattr(i, "id", None): getattr(i, "value", None) for i in (form.body or [])}
+    check("폼이 열림", any(getattr(i, "id", None) == "title" for i in form.body))
+    check("제목이 미리 채워짐", values.get("title") == "9/10(목) 회식 메뉴 선정", str(values))
+    check("투표를 바로 만들지 않음", not any("📊" in card_text(c) and "표**" in card_text(c)
+                                             for c in ctx10.cards()))
+
+    section("핸들러 — 옛 `/` 문법은 폼으로 안내")
+    ctx11 = FakeContext(message("회식장소 / 삼겹살, 치킨, 초밥 / 금요일 18시 / 복수"))
+    await app.handle_message(ctx11)
+    migrated = ctx11.cards()[0]
+    mvalues = {getattr(i, "id", None): getattr(i, "value", None) for i in (migrated.body or [])}
+    mtext = card_text(migrated)
+    check("옛 문법 값이 폼에 옮겨짐",
+          mvalues.get("title") == "회식장소"
+          and mvalues.get("options") == "삼겹살\n치킨\n초밥"
+          and mvalues.get("deadline") == "금요일 18시", str(mvalues))
+    check("문법 변경 안내가 보임", "ℹ️" in mtext and "줄바꿈" in mtext, mtext[:80])
 
 
 async def test_concurrency() -> None:
@@ -649,7 +734,7 @@ async def test_concurrency() -> None:
     section("동시성 — 여러 대화방에서 동시 생성 + 동시 투표")
     creates = []
     for r in range(5):
-        ctx = FakeContext(message(f"방{r} / A, B", who="owner"))
+        ctx = FakeContext(message(f"방{r} 투표\nA\nB", who="owner"))
         ctx.activity.conversation.id = f"19:multi-{r}"
         creates.append(ctx)
     await asyncio.gather(*(app.handle_message(c) for c in creates))

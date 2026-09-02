@@ -77,6 +77,7 @@ limits = [
     ("name.full", m["name"]["full"], 100),
     ("description.short", m["description"]["short"], 80),
     ("description.full", m["description"]["full"], 4000),
+    ("developer.name", m["developer"]["name"], 32),
 ]
 for cl in m["bots"][0].get("commandLists", []):
     for c in cl["commands"]:
@@ -90,6 +91,8 @@ with open(dst, "w", encoding="utf-8") as f:
     json.dump(m, f, ensure_ascii=False, indent=2)
 
 print(f"   @멘션 이름 : @{m['name']['short']}")
+print(f"   버전       : {m['version']}")
+print(f"   작성자     : {m['developer']['name']}")
 print(f"   botId      : {m['bots'][0]['botId']}")
 print(f"   앱 id      : {m['id']}")
 PY

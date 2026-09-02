@@ -139,7 +139,7 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
 
 
 def form_card(creator_name: str, error: str | None = None,
-              values: dict | None = None) -> C.AdaptiveCard:
+              values: dict | None = None, note: str | None = None) -> C.AdaptiveCard:
     """생성 폼. 제출되면 이 카드가 그대로 투표판으로 바뀐다."""
     values = values or {}
     body: list = [
@@ -151,15 +151,19 @@ def form_card(creator_name: str, error: str | None = None,
     if error:
         body.append(C.TextBlock(text=f"⚠️ {error}", color="Attention",
                                 wrap=True, spacing="Medium"))
+    if note:
+        # 오류가 아니라 안내다. 빨간색을 쓰지 않는다.
+        body.append(C.TextBlock(text=f"ℹ️ {note}", color="Accent",
+                                wrap=True, spacing="Medium"))
 
     body += [
         C.TextInput(id="title", label="제목", is_required=True,
                     max_length=MAX_TITLE, placeholder="회식 장소",
                     value=values.get("title"),
                     error_message="제목을 적어주세요"),
-        C.TextInput(id="options", label=f"항목 (줄바꿈 또는 쉼표로 구분, 최대 {MAX_OPTIONS}개)",
+        C.TextInput(id="options", label=f"항목 — 한 줄에 하나씩 (최대 {MAX_OPTIONS}개)",
                     is_required=True, is_multiline=True,
-                    placeholder="삼겹살, 치킨, 초밥",
+                    placeholder="땡땡식당 (https://naver.me/xxxx)\n무슨식당\n초밥집",
                     value=values.get("options"),
                     error_message="항목을 2개 이상 적어주세요"),
         C.TextInput(id="deadline", label="마감 (비우면 마감 없음)",

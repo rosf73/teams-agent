@@ -51,10 +51,19 @@ _locks: dict[str, asyncio.Lock] = {}
 _timers: dict[str, asyncio.Task] = {}
 
 USAGE = (
-    "**사용법**\n"
-    "- `@투표만들기` — 생성 폼을 띄웁니다\n"
-    "- `@투표만들기 회식장소 / 삼겹살, 치킨, 초밥` — 바로 만듭니다\n"
-    "- `@투표만들기 회식장소 / 삼겹살, 치킨 / 금요일 18시 / 복수` — 마감과 복수선택까지\n\n"
+    "**사용법** — 줄바꿈(Shift+Enter)으로 나눕니다. 구분자를 쓰지 않으니 "
+    "제목과 항목에 `/`, 링크, 특수문자를 자유롭게 넣을 수 있습니다.\n\n"
+    "```\n"
+    "@투표만들기 9/10(목) 회식 메뉴 선정\n"
+    "땡땡식당 (https://naver.me/GdymUOVY)\n"
+    "무슨식당 (https://naver.me/Fk738sTW)\n"
+    "초밥집\n"
+    "마감: 금요일 18시\n"
+    "복수\n"
+    "```\n\n"
+    "- **첫 줄** = 제목, **이후 각 줄** = 항목 하나\n"
+    "- `마감: …` 과 `복수` 는 지시어입니다 (생략 가능)\n"
+    "- 제목만 쓰면 입력 폼이 열립니다 — `@투표만들기` 만 보내도 됩니다\n\n"
     "마감 표현: `금요일 18시`, `내일 오후 3시`, `8월 22일 18시`, `3시간`"
 )
 
@@ -163,21 +172,28 @@ async def handle_message(ctx: ActivityContext[MessageActivity]) -> None:
     creator_id = author.id if author else "unknown"
     creator_name = (author.name if author else None) or "알 수 없음"
 
-    fields, error = parsing.parse_one_liner(text)
-    if error:
-        await ctx.send(MessageActivityInput(text=f"⚠️ {error}\n\n{USAGE}"))
+    request = parsing.parse_request(text)
+
+    if request.error:
+        await ctx.send(MessageActivityInput(text=f"⚠️ {request.error}\n\n{USAGE}"))
         return
 
-    if fields is None:
-        # 한 줄 생성 시도가 아니면 폼을 띄운다. 이 카드가 곧 투표판이 된다.
-        await ctx.send(MessageActivityInput().add_card(cards.form_card(creator_name)))
+    if request.needs_form:
+        # 항목이 없으면 파싱하지 않고 폼을 띄운다. 있는 값은 미리 채워 둔다.
+        # 이 카드가 곧 투표판이 된다 (새 메시지를 만들지 않는다).
+        await ctx.send(MessageActivityInput().add_card(cards.form_card(
+            creator_name, note=request.note,
+            values={"title": request.title,
+                    "options": "\n".join(request.options),
+                    "deadline": request.deadline_text,
+                    "multi": request.multi_select})))
         return
 
     poll = store.create_poll(
         conversation_id=activity.conversation.id, service_url=activity.service_url,
         creator_id=creator_id, creator_name=creator_name,
-        title=fields["title"], options=fields["options"],
-        multi_select=fields["multi_select"], closes_at=fields["closes_at"])
+        title=request.title, options=request.options,
+        multi_select=request.multi_select, closes_at=request.closes_at)
 
     sent = await ctx.send(MessageActivityInput().add_card(cards.poll_card(poll)))
     store.set_activity_id(poll.id, sent.id)

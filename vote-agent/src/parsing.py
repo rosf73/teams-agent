@@ -1,8 +1,28 @@
 """입력 파싱 — LLM 없이 정규식으로 처리한다.
 
-한 줄 생성:  제목 / 항목1, 항목2, 항목3 / 마감 / 복수
-마감 표현:   `금요일 18시`, `8/22 18:00`, `내일 14시 30분`, `3시간`, `2일`, `18:00`
+## 구분자를 쓰지 않는다
 
+처음에는 `제목 / 항목1, 항목2 / 마감` 형태로 `/` 를 구분자로 썼는데 실패했다.
+
+- `9/10(목) 회식 메뉴 선정` — 날짜가 든 제목을 쓸 수 없다
+- `땡땡식당 (https://naver.me/xxx)` — 항목에 링크를 넣을 수 없다
+
+`#`, `!`, `|` 로 바꿔도 같은 문제가 반복된다. 제목과 항목에는 **어떤 문자든** 들어갈 수 있다.
+
+그래서 **줄바꿈**을 구조로 쓴다. 줄바꿈은 제목이나 URL 안에 들어갈 수 없으므로
+충돌이 구조적으로 불가능하다.
+
+    @투표만들기 9/10(목) 회식 메뉴 선정        <- 첫 줄 = 제목 (문자 제약 없음)
+    땡땡식당 (https://naver.me/GdymUOVY)      <- 각 줄 = 항목 하나 (URL 자유)
+    무슨식당 (https://naver.me/Fk738sTW)
+    마감: 금요일 18시                          <- 지시어
+    복수
+
+제목만 오면 **폼을 제목 채워서 연다.** 파싱할 것이 없으니 위험도 없다.
+Teams 가 줄바꿈을 삼켜서 한 줄로 오더라도 이 경로로 떨어지므로 조용히 잘못
+해석되는 일이 없다.
+
+마감 표현: `금요일 18시`, `8/22 18:00`, `내일 14시 30분`, `3시간`, `2일`, `18:00`
 시각은 KST 로 해석하고 저장은 UTC 다. 애매하면 **파싱 실패로 처리**한다 —
 엉뚱한 시각으로 조용히 마감되는 것이 더 나쁘다.
 """
@@ -10,6 +30,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -20,6 +41,11 @@ MAX_TITLE = 80
 MAX_LABEL = 60
 
 MULTI_WORDS = ("복수", "다중", "multi", "여러")
+
+# 지시어 줄. 나머지 줄은 모두 항목으로 본다.
+DEADLINE_LINE = re.compile(r"^(?:마감|마감일|마감시각|deadline|due)\s*[:：]\s*(.*)$", re.IGNORECASE)
+MULTI_LINE = re.compile(r"^(?:복수|복수선택|다중|다중선택|중복|multi|multiple)"
+                        r"\s*(?:선택|가능|허용)?\s*$", re.IGNORECASE)
 
 # "1/5" 를 12월에 적으면 내년으로 보지만, 하루 이틀 지난 날짜는 오타로 보고 거절한다.
 YEAR_ROLLOVER_DAYS = 60
@@ -149,43 +175,129 @@ def parse_deadline(text: str, now: datetime | None = None) -> tuple[datetime | N
     return _to_utc(result), None
 
 
-def parse_one_liner(text: str) -> tuple[dict | None, str | None]:
-    """`제목 / 항목1, 항목2 / 마감 / 복수` 를 해석한다.
+@dataclass
+class Request:
+    """채팅 한 건을 해석한 결과.
 
-    반환: (필드 dict 또는 None, 오류 메시지 또는 None)
-    `/` 가 없으면 한 줄 생성 시도가 아니므로 (None, None) 을 준다.
+    셋 중 하나로 끝난다.
+      - `error`      : 사용자에게 문제를 알린다
+      - `needs_form` : 폼을 (있는 값으로 미리 채워서) 연다
+      - 그 외        : 바로 투표를 만든다
     """
-    raw = (text or "").strip()
-    if "/" not in raw:
-        return None, None
 
-    parts = [p.strip() for p in raw.split("/")]
-    title = parts[0]
-    if not title:
-        return None, "제목이 비었습니다."
+    title: str = ""
+    options: list[str] = field(default_factory=list)
+    multi_select: bool = False
+    closes_at: datetime | None = None
+    deadline_text: str = ""
+    error: str | None = None
+    needs_form: bool = False
+    note: str | None = None
+
+
+def normalize_lines(text: str) -> list[str]:
+    """줄 목록으로 만든다.
+
+    Teams 의 `textFormat` 은 `plain` 일 수도 `xml` 일 수도 있어서 줄바꿈이
+    `\n` 으로 오거나 `<br>` 로 온다. 둘 다 처리한다.
+    """
+    raw = text or ""
+    raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"</(?:div|p|li)>", "\n", raw, flags=re.IGNORECASE)
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    return [line.strip() for line in raw.split("\n") if line.strip()]
+
+
+def _split_legacy(line: str) -> dict | None:
+    """옛 `제목 / 항목1, 항목2 / 마감` 문법으로 보이면 최선으로 분해한다.
+
+    확신할 수 없는 추측이므로 **투표를 바로 만들지 않고 폼을 채우는 데만** 쓴다.
+    틀려도 사용자가 폼에서 고치면 되니 손해가 없다.
+
+    `9/10(목) 회식 메뉴 선정` 처럼 날짜가 든 제목은 항목 자리에 쉼표가 없으므로
+    옛 문법으로 오해하지 않는다.
+    """
+    if "/" not in line:
+        return None
+    parts = [p.strip() for p in line.split("/")]
+    if len(parts) < 2 or not parts[0]:
+        return None
+    if "," not in parts[1] and "，" not in parts[1]:
+        return None
+    options = parse_options_block(parts[1])
+    if len(options) < 2:
+        return None
+    tail = " ".join(parts[2:])
+    return {"title": parts[0], "options": options, "tail": tail}
+
+
+def parse_request(text: str) -> Request:
+    """멘션을 제거한 텍스트를 해석한다."""
+    lines = normalize_lines(text)
+
+    if not lines:
+        return Request(needs_form=True)
+
+    # 한 줄뿐이면 항목이 없다. 폼을 제목 채워서 연다.
+    if len(lines) == 1:
+        legacy = _split_legacy(lines[0])
+        if legacy:
+            # '복수' 같은 지시어는 마감 칸에 남기지 않는다. 폼의 토글로 옮긴다.
+            deadline_only = " ".join(_strip_multi_words(legacy["tail"]).split())
+            deadline, error = parse_deadline(deadline_only)
+            return Request(
+                title=legacy["title"], options=legacy["options"],
+                multi_select=_has_multi_word(legacy["tail"]),
+                closes_at=None if error else deadline,
+                deadline_text="" if error else deadline_only,
+                needs_form=True,
+                note="이제 `/` 구분자를 쓰지 않습니다. 값을 옮겨 놓았으니 확인 후 시작하세요. "
+                     "다음부터는 **줄바꿈**(Shift+Enter)으로 항목을 나눠주세요.")
+        return Request(title=lines[0], needs_form=True)
+
+    title, rest = lines[0], lines[1:]
     if len(title) > MAX_TITLE:
-        return None, f"제목이 너무 깁니다 ({len(title)}자 / 최대 {MAX_TITLE}자)."
+        return Request(error=f"제목이 너무 깁니다 ({len(title)}자 / 최대 {MAX_TITLE}자).")
 
-    options = [o.strip() for o in re.split(r"[,，]", parts[1] if len(parts) > 1 else "") if o.strip()]
+    options: list[str] = []
+    deadline_text = ""
+    multi = False
+    for line in rest:
+        matched = DEADLINE_LINE.match(line)
+        if matched:
+            deadline_text = matched.group(1).strip()
+            continue
+        if MULTI_LINE.match(line):
+            multi = True
+            continue
+        options.append(line)
+
     problem = validate_options(options)
     if problem:
-        return None, problem
+        return Request(error=problem)
 
-    tail = " ".join(parts[2:])
-    multi = any(w in tail for w in MULTI_WORDS)
-    for w in MULTI_WORDS:
-        tail = tail.replace(w, " ")
-    deadline, error = parse_deadline(tail)
+    closes_at, error = parse_deadline(deadline_text)
     if error:
-        return None, error
+        return Request(error=error)
 
-    return {"title": title, "options": options, "multi_select": multi,
-            "closes_at": deadline}, None
+    return Request(title=title, options=options, multi_select=multi,
+                   closes_at=closes_at, deadline_text=deadline_text)
+
+
+def _has_multi_word(text: str) -> bool:
+    return any(w in (text or "") for w in MULTI_WORDS)
+
+
+def _strip_multi_words(text: str) -> str:
+    out = text or ""
+    for w in MULTI_WORDS:
+        out = out.replace(w, " ")
+    return out
 
 
 def validate_options(options: list[str]) -> str | None:
     if len(options) < 2:
-        return "항목을 2개 이상 적어주세요. 쉼표로 구분합니다."
+        return "항목을 2개 이상 적어주세요. 한 줄에 하나씩 씁니다."
     if len(options) > MAX_OPTIONS:
         return f"항목이 {len(options)}개입니다. 최대 {MAX_OPTIONS}개까지 됩니다."
     if len(set(options)) != len(options):
@@ -197,9 +309,16 @@ def validate_options(options: list[str]) -> str | None:
 
 
 def parse_options_block(text: str) -> list[str]:
-    """폼에서 받은 여러 줄 또는 쉼표 구분 항목을 목록으로 만든다."""
-    parts = re.split(r"[\n,，]", text or "")
-    return [p.strip() for p in parts if p.strip()]
+    """항목 목록을 만든다. **줄바꿈이 우선**이고, 한 줄일 때만 쉼표로 나눈다.
+
+    항목 이름에 쉼표가 들어갈 수 있다 (`땡땡식당 (강남, 2호점)`).
+    줄바꿈으로 나눈 목록을 다시 쉼표로 쪼개면 그런 이름이 깨진다.
+    """
+    lines = normalize_lines(text)
+    if len(lines) >= 2:
+        return lines
+    single = lines[0] if lines else ""
+    return [p.strip() for p in re.split(r"[,，]", single) if p.strip()]
 
 
 def format_deadline(dt: datetime | None) -> str:
