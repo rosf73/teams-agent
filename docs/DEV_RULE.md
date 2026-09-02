@@ -235,6 +235,9 @@ uvicorn 이 `asyncio.sleep` 중일 때 `SIGTERM` 을 늦게(또는 아예) 처�
 
 `scripts/_common.sh` 의 `stop_port` / `stop_tunnel` 은 TERM → 1.5초 대기 → **`KILL -9`**
 순서로 처리하고, **포트가 실제로 비었는지 확인한 뒤** 반환한다.
+문서에서 `kill` 을 직접 안내하지 않는다 — `./scripts/stopAll` 을 쓴다.
+
+SIGTERM 을 무시하는 프로세스로 `-9` 폴백이 실제로 동작하는 것을 확인했다.
 
 `-9` 가 안전한 이유: vote-agent 는 SQLite 트랜잭션마다 커밋하고 roulette-agent 는
 아무것도 저장하지 않는다.

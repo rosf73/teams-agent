@@ -296,6 +296,13 @@ tail -f ~/dev/ms-teams-agent/logs/*.log
 | `startHost` | 기존 `devtunnel` 프로세스 | 바이너리 위치, 터널 ID(리전 접미사 포함), 포트 URL 출력 | `devtunnel host` |
 | `startRoulette` | 포트 3978 점유 프로세스 | venv, `.env` 존재 | roulette-agent |
 | `startVote` | 포트 3979 점유 프로세스 | venv, `.env` 존재 | vote-agent (기동 시 보존정책 정리) |
+| `stopAll` | **roulette → vote → 터널** 순서로 전부 | 셋 다 내려갔는지 확인 | — |
+
+전부 내리려면:
+
+```bash
+cd ~/dev/ms-teams-agent && ./scripts/stopAll
+```
 
 **종료 방식** — `TERM` 을 먼저 보내고 1.5초 안에 안 죽으면 **`KILL -9`** 로 확실히 끝낸다.
 uvicorn 이 `asyncio.sleep` 중일 때 `TERM` 을 늦게(또는 아예) 처리하지 않아 프로세스가
@@ -383,23 +390,26 @@ any app configurations."*
 | `appPackage/manifest.json` (이름·botId·스코프·명령·아이콘) | zip 재빌드 (STEP 5) + Teams 재설치 (STEP 6) |
 | Dev Tunnel URL 변경 | 봇 등록의 Endpoint address 수정 (STEP 3) |
 
-### ⚠️ 재시작 전에 이전 프로세스가 죽었는지 확인한다
+### 종료는 `stopAll` 하나로 끝낸다
 
-`Ctrl+C` 를 눌렀다고 죽은 게 아니다. 다른 터미널에 남아 있거나 백그라운드로 살아 있으면
-새 프로세스가 `[Errno 48] address already in use` 로 **뜬 직후 바로 종료된다.**
-로그에 "started successfully" 가 먼저 찍히고 그 뒤에 바인드 에러가 나오므로 성공처럼 보인다.
-
-```bash
-lsof -nP -iTCP:3978 -sTCP:LISTEN
-```
-
-무언가 잡고 있으면 그 PID 를 끝낸다:
+`lsof` 로 PID 를 찾아 `kill` 하지 않아도 된다. 순서(**roulette → vote → 터널**)와
+`-9` 폴백까지 스크립트가 처리한다.
 
 ```bash
-kill -9 $(lsof -t -nP -iTCP:3978 -sTCP:LISTEN)
+cd ~/dev/ms-teams-agent && ./scripts/stopAll
 ```
 
-포트가 빈 것을 확인한 뒤 재실행:
+**왜 스크립트인가** — `Ctrl+C` 를 눌렀다고 죽은 게 아니다. uvicorn 이 `asyncio.sleep`
+중일 때 `SIGTERM` 을 늦게(또는 아예) 처리하지 않아 살아남는다. 포트가 잡혀 있으면
+새 프로세스가 `[Errno 48] address already in use` 로 **뜬 직후 바로 종료되는데,
+로그에 "started successfully" 가 먼저 찍혀서 성공처럼 보인다.**
+
+`stopAll` 은 `TERM` → 1.5초 대기 → **`KILL -9`** 로 확실히 끝내고,
+**세 개가 정말 다 내려갔는지 확인한 뒤** 성공을 보고한다. 남아 있으면 `❌` 로 멈춘다.
+아무것도 안 떠 있어도 그냥 성공한다 (몇 번 실행해도 안전).
+
+`startRoulette` / `startVote` / `startHost` 는 각자 자기 몫을 **띄우기 전에 알아서 정리**하므로,
+하나만 재시작할 때는 `stopAll` 없이 그냥 start 스크립트만 실행하면 된다.
 
 ```bash
 cd ~/dev/ms-teams-agent && ./scripts/startRoulette
@@ -479,7 +489,7 @@ launchctl kickstart -k gui/$(id -u)/com.example.teams.roulette
 | 봇을 태그해도 무응답 | `devtunnel show`의 URL과 봇 등록 엔드포인트가 다르다. 터널 재생성 시 URL이 바뀌었을 가능성 |
 | 앱 로그에 401 / `Unauthorized` | `TENANT_ID` 불일치. 경로 A는 비우고, 경로 B는 채운다 (STEP 1 표) |
 | `AADSTS7000215: Invalid client secret` | 시크릿 만료 또는 오타. 새로 발급받는다 |
-| `[Errno 48] address already in use` | 이전 프로세스가 살아 있다. `lsof -t -nP -iTCP:3978 -sTCP:LISTEN` 으로 찾아 `kill` |
+| `[Errno 48] address already in use` | 이전 프로세스가 살아 있다. `./scripts/stopAll` 후 다시 start |
 | 로그에 "started successfully" 뒤 바인드 에러 | 위와 같음. 기동 성공이 아니다 |
 | 코드를 고쳤는데 예전 응답이 온다 | 프로세스를 재시작하지 않았다. zip 재빌드가 아니라 **재시작**이 필요하다 |
 | 응답이 2~3번 중복 | 핸들러가 15초 내 반환하지 않아 Bot Framework가 재전송한 것. 긴 작업은 `asyncio.create_task()`로 분리 |
