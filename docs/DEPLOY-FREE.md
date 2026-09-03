@@ -338,6 +338,26 @@ cd ~/dev/ms-teams-agent && ./scripts/build-package.sh roulette-agent && ./script
 
 스크립트가 `src/.env`의 `CLIENT_ID`를 읽어 매니페스트에 채우고, `TEAMS_APP_ID`가 비어 있으면 GUID를 생성해 `.env`에 적어 넣는다 (재실행해도 같은 GUID를 유지한다 — 앱 신원이 바뀌면 재설치를 해야 하기 때문이다).
 
+### `DEVELOPER_URL` 을 한 번 넣어둔다
+
+매니페스트의 `developer.websiteUrl` / `privacyUrl` / `termsOfUseUrl` 에 들어가는 값이다.
+조직 id·계정 id·cloudId 가 담기는 URL 이라 **매니페스트에 박아 넣지 않고 빌드 때 주입한다.**
+
+```bash
+cd ~/dev/ms-teams-agent && cp .env.build.example .env.build
+```
+
+`.env.build` 를 열어 `DEVELOPER_URL=` 뒤에 URL 을 붙인다. 두 앱이 같은 값을 쓰므로
+저장소 루트에 **한 곳만** 둔다. 이 파일은 `.gitignore` 로 제외된다.
+
+이번 한 번만 쓰고 싶으면 환경변수로 넘겨도 된다:
+
+```bash
+DEVELOPER_URL='https://…' ./scripts/build-package.sh vote-agent
+```
+
+값이 없으면 빌드가 **플레이스홀더가 남은 zip 을 만들지 않고 멈춘다.**
+
 결과물: `<agent>/appPackage/build/appPackage.zip`
 
 ---

@@ -283,6 +283,17 @@ BG="$(parse_background "$1")"   # die 가 서브셸만 종료 → 잘못된 옵�
 `name.short` 30자, `command.title` 32자, `description.short` 80자.
 `build-package.sh` 가 **치환 후** 값으로 검사한다 (플레이스홀더 길이는 의미 없다).
 
+### 조직·계정 식별자는 매니페스트에 박지 않는다
+
+`developer` URL 에는 Atlassian 조직 id·계정 id·cloudId 처럼 조직을 식별하는 값이 들어간다.
+매니페스트는 커밋되므로 그대로 넣으면 공개 저장소로 나간다.
+
+`${{DEVELOPER_URL}}` 플레이스홀더를 두고 빌드 때 주입한다 —
+저장소 루트 `.env.build` (gitignore) 또는 환경변수에서 읽는다.
+값이 없으면 **빌드가 멈춘다** (플레이스홀더가 남은 zip 을 만들지 않는다).
+
+같은 패턴을 쓰는 값: `BOT_ID`, `TEAMS_APP_ID`, `DEVELOPER_URL`.
+
 ### `TEAMS_APP_ID` 는 한 번 정해지면 유지한다
 
 앱 신원이 바뀌면 Teams 에서 재설치해야 한다. `build-package.sh` 가 이를 보장한다.
