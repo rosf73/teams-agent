@@ -18,6 +18,7 @@ import logging
 from collections import OrderedDict
 
 import cards
+import compat
 import parsing
 from config import Config
 from microsoft_teams.api import (
@@ -37,7 +38,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(config.AGENT_NAME)
 
-app = App()
+# SDK 가 모델링하지 못한 activity(예: installationUpdate action=upgrade)를
+# 검증 전에 200 으로 끝낸다. compat.py 의 설명 참고.
+app = App(http_server_adapter=compat.build_adapter())
 store = Store()
 
 # 재전송 방어. 500 이나 15초 초과 시 Bot Framework 가 같은 activity 를 다시 보낸다.

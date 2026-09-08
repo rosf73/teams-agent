@@ -557,6 +557,7 @@ launchctl kickstart -k gui/$(id -u)/com.example.teams.roulette
 | 밤새 돌다가 아침에 죽어 있다 | Mac이 잠들었다. 7-1 |
 | `devtunnel: command not found` (launchd) | plist에 절대 경로를 안 넣었다. 7-2 |
 | 30일 방치 후 터널 접속 불가 | 무활동 만료. `devtunnel create`로 재생성 후 STEP 3 재실행 |
+| 앱 업데이트 직후 `installationUpdate` `ValidationError` → 500 | SDK 가 `action: "upgrade"` 를 모른다. `src/compat.py` 가 검증 앞에서 걸러낸다 — **프로세스 재시작 필요** |
 | 자동완성 메뉴에 예전 명령이 그대로 뜬다 | Teams 클라이언트 캐시. 아래 "명령 목록이 갱신되지 않을 때" |
 
 ---

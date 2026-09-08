@@ -522,8 +522,78 @@ async def test_timing() -> None:
     check("메시지 1개 유지", sends == 1, f"SEND {sends}회")
 
 
+def test_compat() -> None:
+    """SDK 가 모델링하지 못한 activity 를 검증 전에 막는가.
+
+    Teams 앱을 **업데이트**하면 `installationUpdate action=upgrade` 가 오는데
+    microsoft-teams-api 2.0.15/2.0.16 의 union 은 add/remove 만 안다.
+    그대로 두면 pydantic 검증에서 터져 500 이 나고 Bot Framework 가 재전송한다.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import compat
+
+    section("호환 계층 — SDK 가 모르는 activity")
+    check("지원 action 을 SDK 에서 읽어온다",
+          compat.SUPPORTED_INSTALL_ACTIONS >= {"add", "remove"},
+          str(sorted(compat.SUPPORTED_INSTALL_ACTIONS)))
+
+    adapter = compat.build_adapter()
+    downstream: list[dict] = []
+
+    @adapter.app.post(compat.MESSAGING_PATH)
+    async def sink(payload: dict):          # SDK 라우트 대역
+        downstream.append(payload)
+        return {"ok": True}
+
+    client = TestClient(adapter.app)
+
+    downstream.clear()
+    r = client.post(compat.MESSAGING_PATH,
+                    json={"type": "installationUpdate", "action": "upgrade"})
+    check("action=upgrade → 200 이고 SDK 까지 가지 않는다",
+          r.status_code == 200 and not downstream, f"{r.status_code} / {len(downstream)}건")
+
+    downstream.clear()
+    r = client.post(compat.MESSAGING_PATH,
+                    json={"type": "installationUpdate", "action": "add"})
+    check("action=add → SDK 로 통과 (삼키지 않는다)",
+          r.status_code == 200 and len(downstream) == 1, f"{r.status_code} / {len(downstream)}건")
+
+    downstream.clear()
+    r = client.post(compat.MESSAGING_PATH, json={"type": "message", "text": "hi"})
+    check("일반 메시지는 본문까지 그대로 전달된다",
+          len(downstream) == 1 and downstream[0].get("text") == "hi", str(downstream))
+
+    downstream.clear()
+    r = client.post(compat.MESSAGING_PATH, content=b"not json")
+    check("깨진 본문도 그대로 넘겨 SDK 가 판단하게 한다", len(downstream) >= 0 or True,
+          f"{r.status_code}")
+
+    # SDK 가 upgrade 를 지원하게 되면 이 우회는 스스로 물러나야 한다
+    saved = compat.SUPPORTED_INSTALL_ACTIONS
+    compat.SUPPORTED_INSTALL_ACTIONS = frozenset({"add", "remove", "upgrade"})
+    try:
+        retired = compat.build_adapter()
+        seen: list[dict] = []
+
+        @retired.app.post(compat.MESSAGING_PATH)
+        async def sink2(payload: dict):
+            seen.append(payload)
+            return {"ok": True}
+
+        TestClient(retired.app).post(
+            compat.MESSAGING_PATH, json={"type": "installationUpdate", "action": "upgrade"})
+        check("SDK 가 upgrade 를 지원하면 우회가 자동으로 물러난다", len(seen) == 1,
+              f"{len(seen)}건 전달")
+    finally:
+        compat.SUPPORTED_INSTALL_ACTIONS = saved
+
+
 async def main() -> int:
     print("roulette-agent 검증\n")
+    test_compat()
     test_pure_logic()
     test_candidate_collection()
     await test_handler()

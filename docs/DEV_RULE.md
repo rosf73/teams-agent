@@ -332,6 +332,26 @@ BG="$(parse_background "$1")"   # die 가 서브셸만 종료 → 잘못된 옵�
 
 같은 패턴을 쓰는 값: `BOT_ID`, `TEAMS_APP_ID`, `DEVELOPER_URL`.
 
+### SDK 가 모델링하지 않은 activity 는 핸들러 앞에서 500 이 된다
+
+`microsoft-teams-api` 2.0.15 / 2.0.16 의 `installationUpdate` union 은 `add` / `remove` 만 안다.
+Teams 는 앱을 **업데이트**할 때 `action: "upgrade"` 를 보내는데, pydantic 검증이
+`app_process.process_activity` 안에서 터지므로 **미들웨어도 핸들러도 실행되기 전에** 500 이 난다.
+Bot Framework 는 500 을 재시도로 받아 같은 요청을 반복한다.
+
+검증 앞단에서 막아야 한다. `AppOptions.http_server_adapter` 가 지원되는 훅이므로,
+자기 `FastAPI` 를 가진 `FastAPIAdapter` 를 넘기고 미들웨어에서 걸러낸다 (`src/compat.py`).
+
+두 가지를 지킨다:
+
+- **본문 스트림을 복구한다.** `await request.body()` 로 한 번 읽으면 downstream 이 빈 본문을 본다.
+  `request._receive` 를 다시 꽂아야 정상 메시지가 SDK 까지 도달한다.
+- **허용 목록을 SDK 에서 읽는다.** union 멤버의 `action` Literal 값을 뽑아 쓰면,
+  SDK 가 `upgrade` 를 지원하는 순간 우회가 **스스로 물러난다.** 상수로 박으면 영구 부채가 된다.
+
+업스트림 `main` 에 `InstalledUpgradeActivity` 가 있어도 릴리스에는 없을 수 있다 —
+2.0.16 휠을 내려받아 `upgrade.py` 가 없음을 확인했다. **저장소가 아니라 설치된 휠을 본다.**
+
 ### Teams 클라이언트는 commandList 를 캐시한다
 
 매니페스트 `version` 을 올려 재업로드해도 자동완성 메뉴는 **예전 명령이 그대로 남는다.**

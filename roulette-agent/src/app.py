@@ -25,6 +25,7 @@ import logging
 import random
 from collections import OrderedDict
 
+import compat
 import lines
 import mentions as M
 import microsoft_teams.cards as C
@@ -41,7 +42,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(config.AGENT_NAME)
 
-app = App()
+# SDK 가 모델링하지 못한 activity(예: installationUpdate action=upgrade)를
+# 검증 전에 200 으로 끝낸다. compat.py 의 설명 참고.
+app = App(http_server_adapter=compat.build_adapter())
 rng = random.SystemRandom()
 
 # 문구는 덱에서 꺼낸다. random.choice 는 같은 것을 연속으로 뽑는다.
