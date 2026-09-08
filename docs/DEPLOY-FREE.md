@@ -407,14 +407,22 @@ any app configurations."*
 |---|---|
 | `app.py`, `config.py` 등 **코드** | **프로세스 재시작만.** zip·재설치 불필요 |
 | `src/.env` 값 | 프로세스 재시작만 |
-| `appPackage/manifest.json` (이름·botId·스코프·명령·아이콘) | zip 재빌드 (STEP 5) + Teams 재설치 (STEP 6) |
+| `appPackage/manifest.json` (이름·botId·스코프·명령·아이콘) | zip 재빌드 (STEP 5) + 앱 관리 업로드 + **채팅방마다 제거 후 재추가** |
 
-### 명령 목록이 갱신되지 않을 때
+### 앱 관리에 업로드해도 기존 채팅방에는 반영되지 않는다
 
-`commandLists` 를 바꾸고 `version` 을 올려 재업로드해도, 자동완성 메뉴에는
-**예전 명령이 남는다.** Teams 클라이언트가 명령 목록을 따로 캐시한다.
+**앱 관리에 새 zip 을 올리는 것은 조직 카탈로그의 항목만 갱신한다.**
+이미 설치된 채팅방의 인스턴스는 그대로 남는다 — 그래서 `version` 을 올려 재업로드해도
+자동완성 메뉴에 예전 명령이 계속 뜬다.
 
-먼저 무엇이 낡았는지 가른다 — 메뉴에 뜬 제목을 현재 zip 과 대조한다:
+**해당 채팅방에서 앱을 제거하고 다시 추가해야 한다** (실행해서 확인함).
+채팅방이 여러 개면 각각 해줘야 한다.
+
+이것이 개발 루프의 비대칭이다 — **코드**는 프로세스 재시작만으로 모든 채팅방에 즉시 반영되지만,
+**매니페스트**는 채팅방마다 손으로 재적용해야 한다. 명령 목록을 자주 바꿀 때는
+테스트 채팅방 하나만 두고 확정된 뒤에 옮기는 편이 낫다.
+
+반영이 안 됐을 때 원인을 가르려면 메뉴에 뜬 제목을 현재 zip 과 대조한다:
 
 ```bash
 unzip -p vote-agent/appPackage/build/appPackage.zip manifest.json | python3 -m json.tool
@@ -422,11 +430,10 @@ unzip -p vote-agent/appPackage/build/appPackage.zip manifest.json | python3 -m j
 
 (`commandLists` 는 최상위가 아니라 `bots[0]` 아래에 있다.)
 
-zip 에 없는 제목이 메뉴에 뜬다면 **캐시**다. 위에서부터 시도한다:
+- **zip 에 없는 제목이 메뉴에 뜬다** → 채팅방 인스턴스가 낡았다. 제거 후 재추가한다
+- **zip 에도 그 제목이 있다** → 매니페스트를 고치고 zip 을 다시 빌드한다 (STEP 5)
 
-1. Teams 완전 종료 후 재실행 — 창을 닫는 게 아니라 `⌘Q`(Mac) / 트레이 아이콘 → 종료
-2. 그 채팅방에서 앱을 제거하고 다시 추가
-3. `teams.microsoft.com` (웹) 에서 확인 — 캐시가 분리되어 있어 갱신 여부를 빠르게 가른다
+재추가 후에도 그대로면 Teams 를 완전 종료(`⌘Q`, 창 닫기가 아니다)했다 다시 켠다.
 
 ### 자동완성이 봇 태그를 중복으로 넣을 때
 
@@ -558,7 +565,7 @@ launchctl kickstart -k gui/$(id -u)/com.example.teams.roulette
 | `devtunnel: command not found` (launchd) | plist에 절대 경로를 안 넣었다. 7-2 |
 | 30일 방치 후 터널 접속 불가 | 무활동 만료. `devtunnel create`로 재생성 후 STEP 3 재실행 |
 | 앱 업데이트 직후 `installationUpdate` `ValidationError` → 500 | SDK 가 `action: "upgrade"` 를 모른다. `src/compat.py` 가 검증 앞에서 걸러낸다 — **프로세스 재시작 필요** |
-| 자동완성 메뉴에 예전 명령이 그대로 뜬다 | Teams 클라이언트 캐시. 아래 "명령 목록이 갱신되지 않을 때" |
+| 자동완성 메뉴에 예전 명령이 그대로 뜬다 | 앱 관리 업로드는 기존 채팅방에 전파되지 않는다. 그 채팅방에서 제거 후 재추가 |
 
 ---
 
