@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
   "manifestVersion": "1.29",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "id": "${{TEAMS_APP_ID}}",
   "developer": {
     "name": "김민지 (Minji Kim)",
@@ -46,11 +46,15 @@
           "commands": [
             {
               "title": "@투표만들기",
-              "description": "입력 폼을 엽니다. 제목을 함께 쓰면 미리 채워집니다."
+              "description": "입력 폼을 엽니다. 제목을 함께 쓰면 미리 채워집니다.",
+              "type": "prompt",
+              "prompt": "회식 메뉴 선정"
             },
             {
               "title": "@투표만들기 + 줄바꿈 목록",
-              "description": "첫 줄은 제목, 이후 각 줄은 항목. `마감: 금요일 18시` 와 `복수` 는 지시어입니다."
+              "description": "첫 줄은 제목, 이후 각 줄은 항목. `마감: 금요일 18시` 와 `복수` 는 지시어입니다.",
+              "type": "prompt",
+              "prompt": "9/10(목) 회식 메뉴 선정\n땡땡식당\n무슨식당\n초밥집\n마감: 금요일 18시\n복수"
             }
           ]
         },

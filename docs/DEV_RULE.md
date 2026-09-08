@@ -117,6 +117,9 @@ print(inspect.signature(ConversationMemberClient.get))
 | 게이지 분모 = 최다 득표 | 1위가 항상 만점이라 안 움직인다. 분모는 참여자 수 |
 | 카드 액션 라우팅 = `verb` | **`data["action"]`** 이다. verb 만 넣으면 조용히 매칭 실패 |
 | `/` 를 입력 구분자로 | 날짜·링크가 든 값에서 깨진다. 줄바꿈을 구조로 쓴다 |
+| 평문 메시지에 헤딩으로 크게 | text-only 는 Header 미지원. 카드로 바꿔야 한다 |
+| `command.title` 32자 제한 | 실제 **128자** |
+| 자동완성이 `description` 을 삽입 | `title` 을 삽입한다. 분리하려면 `type: "prompt"` |
 
 ---
 
@@ -214,6 +217,37 @@ for h in handlers:
 `C.TextBlock("텍스트")` 는 `BaseModel.__init__() takes 1 positional argument` 로 실패한다.
 `C.TextBlock(text="텍스트")` 로 쓴다.
 
+### 평문 메시지로는 글자를 크게 할 수 없다
+
+공식 지원 표 (`bots/how-to/format-your-bot-messages`):
+
+| 스타일 | 평문 메시지 | 리치 카드 |
+|---|---|---|
+| Bold | ✔️ | ❌ |
+| Header (levels 1–3) | **❌** | ✔️ |
+
+평문 메시지에서 글자 크기를 키우는 표준 방법은 **없다.** 굵게·기울임뿐이다.
+크기를 조절해야 하면 **Adaptive Card** 로 바꾸고 `TextBlock(size="Large")` 를 쓴다.
+roulette 판을 카드로 옮긴 이유가 이것이다 (대사 줄만 크게).
+
+### 자동완성 항목은 `title` 이 그대로 삽입된다
+
+`commandLists[].commands[]` 의 기본 동작(`type: "basic"`)은 **`title` 을 입력창에 붙여넣는 것**이다.
+그래서 title 에 `@에이전트` 를 넣어두면 사용자가 이미 입력한 멘션에 **또 붙어서 중복**된다.
+
+`type: "prompt"` 로 두면 표시와 삽입이 분리된다:
+
+| 필드 | 역할 |
+|---|---|
+| `title` | 메뉴에 **표시** |
+| `description` | 메뉴에 **표시** (설명·예시) |
+| `prompt` | 선택 시 입력창에 **삽입** (최대 4000자) |
+
+공식 문서: *"When a user selects a prompt starter, Teams inserts its `prompt` value
+into the user's compose box."* `commandList` 당 명령 12개까지.
+
+`title` 최대 길이는 **128자**다 (32자로 알고 제한을 걸어뒀던 적이 있다).
+
 ### 진행 게이지의 분모를 최대값으로 잡지 않는다
 
 막대·게이지를 **최대값 기준**으로 채우면 1위는 항상 만점, 최소값은 항상 0 이라
@@ -280,8 +314,12 @@ BG="$(parse_background "$1")"   # die 가 서브셸만 종료 → 잘못된 옵�
 
 ### 매니페스트 길이 제약
 
-`name.short` 30자, `command.title` 32자, `description.short` 80자.
+`name.short` 30자, `name.full` 100자, `description.short` 80자, `description.full` 4000자,
+`developer.name` 32자, `command.title` **128자**, `command.description`/`command.prompt` 4000자.
 `build-package.sh` 가 **치환 후** 값으로 검사한다 (플레이스홀더 길이는 의미 없다).
+
+`command.title` 을 32자로 잘못 알고 멀쩡한 제목을 줄인 적이 있다. 한도는 스키마에서 확인하고,
+스크립트의 숫자를 유일한 출처로 삼는다 — 기억이 아니라.
 
 ### 조직·계정 식별자는 매니페스트에 박지 않는다
 
@@ -293,6 +331,16 @@ BG="$(parse_background "$1")"   # die 가 서브셸만 종료 → 잘못된 옵�
 값이 없으면 **빌드가 멈춘다** (플레이스홀더가 남은 zip 을 만들지 않는다).
 
 같은 패턴을 쓰는 값: `BOT_ID`, `TEAMS_APP_ID`, `DEVELOPER_URL`.
+
+### Teams 클라이언트는 commandList 를 캐시한다
+
+매니페스트 `version` 을 올려 재업로드해도 자동완성 메뉴는 **예전 명령이 그대로 남는다.**
+"명령을 바꿨는데 반영이 안 된다" 를 코드 문제로 진단하기 전에,
+메뉴에 뜬 제목이 **현재 매니페스트에 존재하는 문자열인지** 먼저 확인한다.
+없는 문자열이면 클라이언트 캐시이고, 코드는 아직 한 번도 실행되지 않았다.
+
+`zip` 안의 값을 근거로 삼는다 (`unzip -p ... manifest.json`). 소스 매니페스트는
+빌드했다는 증거가 아니다. `commandLists` 는 최상위가 아니라 **`bots[0]` 아래**에 있다.
 
 ### `TEAMS_APP_ID` 는 한 번 정해지면 유지한다
 

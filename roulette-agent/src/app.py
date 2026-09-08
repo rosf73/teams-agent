@@ -13,6 +13,10 @@
   3. 같은 자리에 **고정된 판**을 두고 값만 바꾼다. 메시지를 다 읽어야 현황을 아는 방식은
      눈에 들어오지 않는다.
 
+판은 **Adaptive Card** 다. 평문 메시지로는 대사 줄을 크게 만들 수 없다 —
+공식 문서의 지원 표에서 `Header (levels 1–3)` 은 text-only 메시지에서 ❌ 이고
+rich card 에서만 ✔️ 다. 카드의 `TextBlock(size="Large")` 로 대사만 키운다.
+
 LLM 을 쓰지 않는다. 난수는 random.SystemRandom, 문구는 고정 풀에서 고른다.
 """
 
@@ -23,6 +27,7 @@ from collections import OrderedDict
 
 import lines
 import mentions as M
+import microsoft_teams.cards as C
 import roulette as R
 from config import Config
 from microsoft_teams.api import Account, MessageActivity, MessageActivityInput
@@ -106,7 +111,7 @@ def _tease_order(pool: list[Account], count: int) -> list[Account]:
 
 
 class Panel:
-    """연출 전체를 담는 단 하나의 메시지.
+    """연출 전체를 담는 단 하나의 메시지 (Adaptive Card).
 
     첫 전송 이후에는 같은 activity 를 계속 편집한다. 필드 값을 바꿔 render() 를
     호출하면 판이 갱신된다.
@@ -117,20 +122,16 @@ class Panel:
         self._activities = ctx.api.conversations.activities(ctx.activity.conversation.id)
         self._ctx = ctx
         self._plan = plan
+        self._winners_count = winners_count
+        self._notes = notes
         self._activity_id: str | None = None
-
-        header = (f"🎲 **당첨자뽑기** · 후보 **{plan.total}명** · "
-                  f"당첨 **{winners_count}자리**")
-        if notes:
-            header += "\n" + "\n".join(f"_{note}_" for note in notes)
-        self._header = header
 
         self.state = "준비 중"
         self.survivors: list[Account] = []
         self.step = 0
         self.line = "🥁 곧 시작합니다…"
 
-    def _text(self) -> str:
+    def _card(self) -> C.AdaptiveCard:
         total = self._plan.total_steps
         filled = round(BAR_WIDTH * self.step / total) if total else 0
         bar = BAR_FILLED * filled + BAR_EMPTY * (BAR_WIDTH - filled)
@@ -142,21 +143,33 @@ class Panel:
         else:
             shown = "—"
 
-        return "\n\n".join([
-            self._header,
-            # 진행 상태의 "x/n번째 뽑는중" 과 헷갈리지 않게 완료 수임을 밝힌다.
-            f"▸ **{self.state}**\n▸ 생존 {shown}\n▸ {bar} 완료 {self.step}/{total}",
-            self.line,
-        ])
+        body: list = [
+            C.TextBlock(text=f"🎲 **당첨자뽑기** · 후보 **{self._plan.total}명** · "
+                             f"당첨 **{self._winners_count}자리**",
+                        wrap=True),
+        ]
+        for note in self._notes:
+            body.append(C.TextBlock(text=note, size="Small", is_subtle=True,
+                                    wrap=True, spacing="None"))
+        body += [
+            C.TextBlock(text=f"▸ **{self.state}**", wrap=True, spacing="Medium"),
+            C.TextBlock(text=f"▸ 생존 {shown}", wrap=True, spacing="None"),
+            C.TextBlock(text=f"▸ {bar} 완료 {self.step}/{total}",
+                        wrap=True, spacing="None"),
+            # 대사만 크게. 이것이 카드를 쓰는 이유다.
+            C.TextBlock(text=self.line, size="Large", wrap=True, spacing="Medium"),
+        ]
+        return C.AdaptiveCard(body=body)
 
     async def open(self) -> None:
-        sent = await self._ctx.send(MessageActivityInput(text=self._text()))
+        sent = await self._ctx.send(MessageActivityInput().add_card(self._card()))
         self._activity_id = sent.id
 
     async def beat(self, line: str, hold: float) -> None:
         """대사를 바꿔 한 박자 보여주고 기다린다."""
         self.line = line
-        await self._activities.update(self._activity_id, MessageActivityInput(text=self._text()))
+        await self._activities.update(
+            self._activity_id, MessageActivityInput().add_card(self._card()))
         await asyncio.sleep(hold)
 
 
@@ -165,7 +178,7 @@ async def _run_draw(ctx: ActivityContext[MessageActivity], plan: R.Plan,
     """연출을 진행한다. 핸들러와 분리된 백그라운드 태스크에서 돈다."""
     panel = Panel(ctx, plan, winners_count, notes)
     await panel.open()
-    await asyncio.sleep(R.ANNOUNCE_HOLD)
+    await asyncio.sleep(R.hold(R.ANNOUNCE_HOLD, rng))
 
     for step in plan.steps:
         last = step.kind == "final"
@@ -178,13 +191,13 @@ async def _run_draw(ctx: ActivityContext[MessageActivity], plan: R.Plan,
             for teased in _tease_order(step.pool, R.tease_count(rng)):
                 await panel.beat(
                     "🥁 " + DECKS["TEASE"].draw().format(name=M.short_name(teased.name)),
-                    R.TEASE_HOLD)
-            await panel.beat("🥁 " + DECKS["FINAL_INTRO"].draw(), R.INTRO_HOLD)
+                    R.hold(R.TEASE_HOLD, rng))
+            await panel.beat("🥁 " + DECKS["FINAL_INTRO"].draw(), R.hold(R.INTRO_HOLD, rng))
         else:
-            await panel.beat("🥁 " + DECKS["INTRO"].draw(), R.INTRO_HOLD)
+            await panel.beat("🥁 " + DECKS["INTRO"].draw(), R.hold(R.INTRO_HOLD, rng))
 
-        # 2박자 — 두구두구
-        await panel.beat("🥁 " + DECKS["DRUMROLL"].draw(), R.DRUM_HOLD)
+        # 2박자 — 두구두구. 발표 직전이라 대기를 가장 크게 흔든다.
+        await panel.beat("🥁 " + DECKS["DRUMROLL"].draw(), R.hold(R.DRUM_HOLD, rng))
 
         # 3박자 — 발표
         panel.survivors.extend(step.survivors)
@@ -196,7 +209,7 @@ async def _run_draw(ctx: ActivityContext[MessageActivity], plan: R.Plan,
         else:
             joined = "**, **".join(M.short_name(a.name) for a in step.survivors)
             line = "😌 " + DECKS["ANNOUNCE_MANY"].draw().format(names=joined)
-        await panel.beat(line, R.ANNOUNCE_HOLD)
+        await panel.beat(line, R.hold(R.ANNOUNCE_HOLD, rng))
 
     # 마무리 — 당첨자 공개
     panel.state = "종료됨"
@@ -244,8 +257,9 @@ async def handle_message(ctx: ActivityContext[MessageActivity]) -> None:
         return
 
     plan = R.plan(candidates.members, n, rng)
-    logger.info("추첨 시작 conversation=%s 후보=%d n=%d 단계=%d 예상=%.0f초",
-                conversation_id, plan.total, n, plan.total_steps, R.estimated_seconds(plan))
+    low, high = R.estimated_bounds(plan)
+    logger.info("추첨 시작 conversation=%s 후보=%d n=%d 단계=%d 예상=%.0f~%.0f초",
+                conversation_id, plan.total, n, plan.total_steps, low, high)
 
     # 전원 당첨은 뽑을 것이 없으니 연출도 없다.
     if plan.all_winners:

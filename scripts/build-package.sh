@@ -105,8 +105,10 @@ limits = [
 ]
 for cl in m["bots"][0].get("commandLists", []):
     for c in cl["commands"]:
-        limits += [("command.title", c["title"], 32),
-                   ("command.description", c["description"], 128)]
+        limits += [("command.title", c["title"], 128),
+                   ("command.description", c["description"], 4000)]
+        if c.get("type") == "prompt":
+            limits += [("command.prompt", c.get("prompt", ""), 4000)]
 for name, val, limit in limits:
     if len(val) > limit:
         sys.exit(f"❌ {name} 가 {len(val)}자로 한도 {limit}자를 넘었다: {val}")

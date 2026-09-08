@@ -408,6 +408,46 @@ any app configurations."*
 | `app.py`, `config.py` 등 **코드** | **프로세스 재시작만.** zip·재설치 불필요 |
 | `src/.env` 값 | 프로세스 재시작만 |
 | `appPackage/manifest.json` (이름·botId·스코프·명령·아이콘) | zip 재빌드 (STEP 5) + Teams 재설치 (STEP 6) |
+
+### 명령 목록이 갱신되지 않을 때
+
+`commandLists` 를 바꾸고 `version` 을 올려 재업로드해도, 자동완성 메뉴에는
+**예전 명령이 남는다.** Teams 클라이언트가 명령 목록을 따로 캐시한다.
+
+먼저 무엇이 낡았는지 가른다 — 메뉴에 뜬 제목을 현재 zip 과 대조한다:
+
+```bash
+unzip -p vote-agent/appPackage/build/appPackage.zip manifest.json | python3 -m json.tool
+```
+
+(`commandLists` 는 최상위가 아니라 `bots[0]` 아래에 있다.)
+
+zip 에 없는 제목이 메뉴에 뜬다면 **캐시**다. 위에서부터 시도한다:
+
+1. Teams 완전 종료 후 재실행 — 창을 닫는 게 아니라 `⌘Q`(Mac) / 트레이 아이콘 → 종료
+2. 그 채팅방에서 앱을 제거하고 다시 추가
+3. `teams.microsoft.com` (웹) 에서 확인 — 캐시가 분리되어 있어 갱신 여부를 빠르게 가른다
+
+### 자동완성이 봇 태그를 중복으로 넣을 때
+
+`type: "basic"` 은 `title` 을 그대로 compose box 에 넣는다. `title` 이
+`@투표만들기 회식` 이면 이미 입력된 봇 멘션 뒤에 **한 번 더** 붙는다.
+
+`type: "prompt"` 로 두고 `title` (미리보기) 과 `prompt` (실제 삽입) 를 분리한다:
+
+```json
+{
+  "title": "@투표만들기 + 줄바꿈 목록",
+  "description": "...",
+  "type": "prompt",
+  "prompt": "회식 메뉴 선정\n삼겹살\n치킨"
+}
+```
+
+`prompt` 에는 봇 멘션을 **넣지 않는다.** 한도는 `title` 128자, `prompt` 4000자.
+
+캐시를 확실히 비운 뒤에도 멘션이 중복된다면 그 클라이언트가 `prompt` 를 무시하는 것이다.
+`title` 에서도 `@봇이름` 을 빼는 수밖에 없다 (미리보기가 달라지는 대가를 치른다).
 | Dev Tunnel URL 변경 | 봇 등록의 Endpoint address 수정 (STEP 3) |
 
 ### 종료는 `stopAll` 하나로 끝낸다
@@ -517,6 +557,7 @@ launchctl kickstart -k gui/$(id -u)/com.example.teams.roulette
 | 밤새 돌다가 아침에 죽어 있다 | Mac이 잠들었다. 7-1 |
 | `devtunnel: command not found` (launchd) | plist에 절대 경로를 안 넣었다. 7-2 |
 | 30일 방치 후 터널 접속 불가 | 무활동 만료. `devtunnel create`로 재생성 후 STEP 3 재실행 |
+| 자동완성 메뉴에 예전 명령이 그대로 뜬다 | Teams 클라이언트 캐시. 아래 "명령 목록이 갱신되지 않을 때" |
 
 ---
 

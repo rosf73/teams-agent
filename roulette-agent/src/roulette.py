@@ -126,12 +126,19 @@ def plan(candidates: list[Account], n: int, rng: random.Random | None = None) ->
     return Plan(candidates=candidates, winners=winners, steps=steps)
 
 
-# 각 박자를 보여준 뒤 다음 편집까지의 대기.
-# 편집 호출 간격이 이 값이므로 1.0초 미만으로 내리면 Teams 전송 한도에 가까워진다.
-INTRO_HOLD = 1.2
-DRUM_HOLD = 1.8
-ANNOUNCE_HOLD = 1.0
-TEASE_HOLD = 1.3
+# 각 박자를 보여준 뒤 다음 편집까지의 대기. **(최소, 최대) 범위**다.
+#
+# 고정 대기를 쓰면 몇 라운드 만에 "이만큼 기다리면 다음 대사가 뜬다" 는 것을
+# 무의식중에 학습해 버려서 긴장이 사라진다. 매번 흔들어야 한다.
+#
+# 특히 발표 직전(DRUM)을 가장 크게 흔든다 — 여기가 긴장의 정점이다.
+#
+# ⚠️ 최소값은 1.0초 이상을 유지한다. 이 대기가 곧 편집 API 호출 간격이므로,
+#    더 짧아지면 Teams 대화방 전송 한도에 가까워진다.
+INTRO_HOLD = (1.0, 1.7)
+DRUM_HOLD = (1.2, 3.2)
+ANNOUNCE_HOLD = (1.0, 1.5)
+TEASE_HOLD = (1.0, 2.1)
 
 # 마지막 단계에서 이름을 불러놓고 농담으로 돌리는 횟수.
 TEASE_MIN, TEASE_MAX = 3, 5
@@ -141,7 +148,25 @@ def tease_count(rng: random.Random) -> int:
     return rng.randint(TEASE_MIN, TEASE_MAX)
 
 
-def estimated_seconds(p: Plan, teases: int = (TEASE_MIN + TEASE_MAX) // 2) -> float:
-    """판을 띄운 뒤 한 박자 + 단계당 3박자 + 마지막 단계의 뜸들이기까지."""
-    step = INTRO_HOLD + DRUM_HOLD + ANNOUNCE_HOLD
-    return ANNOUNCE_HOLD + len(p.steps) * step + teases * TEASE_HOLD
+def hold(spec: tuple[float, float], rng: random.Random) -> float:
+    """(최소, 최대) 범위에서 대기 시간을 뽑는다."""
+    low, high = spec
+    return rng.uniform(low, high)
+
+
+def estimated_bounds(p: Plan) -> tuple[float, float]:
+    """(최소, 최대) 예상 소요. 대기가 범위라서 단일 값으로 말할 수 없다.
+
+    판을 띄운 뒤 한 박자 + 단계당 3박자 + 마지막 단계의 뜸들이기까지 센다.
+    """
+    def total(index: int, teases: int) -> float:
+        step = INTRO_HOLD[index] + DRUM_HOLD[index] + ANNOUNCE_HOLD[index]
+        return ANNOUNCE_HOLD[index] + len(p.steps) * step + teases * TEASE_HOLD[index]
+
+    return total(0, TEASE_MIN), total(1, TEASE_MAX)
+
+
+def estimated_seconds(p: Plan) -> float:
+    """예상 소요의 중간값. 로그에 한 줄로 적을 때 쓴다."""
+    low, high = estimated_bounds(p)
+    return (low + high) / 2

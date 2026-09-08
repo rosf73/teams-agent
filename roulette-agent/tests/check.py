@@ -106,6 +106,20 @@ class FakeContext:
     def texts(self, kind=None) -> list[str]:
         return [(m.text or "") for _, k, m in self.calls if kind is None or k == kind]
 
+    def cards(self, kind=None) -> list:
+        """첨부된 Adaptive Card 목록. 판은 평문이 아니라 카드다."""
+        out = []
+        for _, k, m in self.calls:
+            if kind is not None and k != kind:
+                continue
+            for att in (getattr(m, "attachments", None) or []):
+                out.append(att.content)
+        return out
+
+    def panels(self, kind=None) -> list[str]:
+        """카드 본문을 줄바꿈으로 이어 붙인 문자열."""
+        return [panel_text(c) for c in self.cards(kind)]
+
     def mentioned_names(self) -> set[str]:
         return {e.mentioned.name for _, _, m in self.calls for e in (m.entities or [])}
 
@@ -122,7 +136,7 @@ class fast_delays:
     def __enter__(self):
         self._saved = {k: getattr(R, k) for k in self.KEYS}
         for k in self.KEYS:
-            setattr(R, k, 0.0)
+            setattr(R, k, (0.0, 0.0))   # 대기는 (최소, 최대) 범위다
         return self
 
     def __exit__(self, *exc):
@@ -143,6 +157,32 @@ async def run_handler(app_module, ctx) -> None:
     await app_module.handle_message(ctx)
     if not await wait_idle(app_module):
         raise AssertionError("연출이 제한 시간 안에 끝나지 않았다")
+
+
+def panel_text(card) -> str:
+    """카드 본문의 TextBlock 들을 이어 붙인다."""
+    body = card.get("body", []) if isinstance(card, dict) else (card.body or [])
+    parts = []
+    for item in body:
+        text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def spoken_line(card) -> str:
+    """대사 필드 = 본문의 마지막 TextBlock."""
+    return panel_text(card).split("\n")[-1]
+
+
+def block_size(card, needle: str) -> str | None:
+    """`needle` 을 담은 TextBlock 의 size 를 돌려준다."""
+    body = card.get("body", []) if isinstance(card, dict) else (card.body or [])
+    for item in body:
+        text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if text and needle in text:
+            return item.get("size") if isinstance(item, dict) else getattr(item, "size", None)
+    return None
 
 
 def section(title: str) -> None:
@@ -265,25 +305,46 @@ async def _handler_cases(app) -> None:
     await run_handler(app, ctx)
     sends = [m for _, k, m in ctx.calls if k == "SEND"]
     updates = [m for _, k, m in ctx.calls if k == "UPDATE"]
-    check("메시지는 딱 1개 (나머지는 편집)", len(sends) == 1, f"SEND {len(sends)} / UPDATE {len(updates)}")
+    check("메시지는 딱 1개 (나머지는 편집)", len(sends) == 1,
+          f"SEND {len(sends)} / UPDATE {len(updates)}")
     check("@태그를 전혀 쓰지 않음", not ctx.mentioned_names(), f"{ctx.mentioned_names()}")
 
-    final = (updates[-1].text or "")
+    panels = ctx.panels()
+    check("판이 Adaptive Card 로 나간다 (평문 아님)",
+          len(panels) == len(ctx.calls) and all(not (m.text or "")
+                                                for _, _, m in ctx.calls),
+          f"카드 {len(panels)} / 호출 {len(ctx.calls)}")
+
+    final = panels[-1]
     for field in ("🎲 **당첨자뽑기**", "▸ **종료됨**", "▸ 생존 ", "🎯 **당첨**"):
         check(f"최종 판에 {field!r} 있음", field in final)
     check("후보 10명 이름이 모두 판에 등장 (짧은 이름)",
           all(f"**{M.short_name(n)}**" in final for n in NAMES), "")
     check("긴 표시명은 축약", "(Alpha Tester)" not in final, "")
-    check("진척 바가 8/8 로 끝남", "8/8" in final, final.split("\n")[3] if "\n" in final else "")
+    check("진척 바가 8/8 로 끝남", "8/8" in final, "")
+    progress = [l for l in final.splitlines() if "완료" in l][0]
+    check("진척 바를 백틱으로 감싸지 않는다", "`" not in progress, progress)
+    check("진척 바가 채움 문자로 가득 찬다",
+          progress.count(app.BAR_FILLED) == app.BAR_WIDTH
+          and app.BAR_EMPTY not in progress, progress)
 
-    # 패널은 "\n\n" 으로 이어진 블록이고 마지막 블록이 대사 필드다.
-    # 패널 전체에서 이름을 찾으면 헤더와 생존자 목록의 볼드까지 잡힌다.
-    def spoken(message) -> str:
-        return (message.text or "").split("\n\n")[-1]
+    # ── 대사 줄만 크게 ────────────────────────────────────────────
+    # 평문 메시지로는 글자를 크게 할 수 없다 (Header 1-3 은 text-only 미지원).
+    # 그래서 판을 카드로 두고 대사 TextBlock 만 size=Large 로 만든다.
+    cards_all = ctx.cards()
+    drum = next((c for c in cards_all if "두구" in spoken_line(c)), None)
+    check("두구두구 대사가 판에 있다", drum is not None)
+    if drum is not None:
+        check("대사 줄이 size=Large", block_size(drum, spoken_line(drum)) == "Large",
+              str(block_size(drum, spoken_line(drum))))
+        header_size = block_size(drum, "🎲 **당첨자뽑기**")
+        check("헤더는 크게 하지 않는다 (대사만)", header_size != "Large", str(header_size))
+        state_size = block_size(drum, "번째 뽑는중")
+        check("진행 상태도 크게 하지 않는다", state_size != "Large", str(state_size))
 
     tease_marks = ("농담", "아 아닙니다", "인 줄 알았죠", "다시 뵙겠습니다",
                    "할 줄 아셨죠", "표정 좋으신데", "어? 아니네요", "긴장하셨나요")
-    teases = [spoken(m) for m in updates if any(k in spoken(m) for k in tease_marks)]
+    teases = [spoken_line(c) for c in cards_all if any(k in spoken_line(c) for k in tease_marks)]
     check("마지막 단계 뜸들이기 3~5회", 3 <= len(teases) <= 5, f"{len(teases)}회")
 
     import re as _re
@@ -292,13 +353,7 @@ async def _handler_cases(app) -> None:
     check("뜸들이기 대상은 남은 후보(3명)뿐", len(set(called)) <= 3, f"{sorted(set(called))}")
     consecutive = sum(1 for a, b in zip(called, called[1:]) if a and a == b)
     check("뜸들이기 이름 연속 중복 없음", consecutive == 0, f"중복 {consecutive}건")
-
     check("진척 라벨이 '완료' 로 구분됨", "완료 8/8" in final)
-    progress = [l for l in final.splitlines() if "완료" in l][0]
-    check("진척 바를 백틱으로 감싸지 않는다", "`" not in progress, progress)
-    check("진척 바가 채움 문자로 가득 찬다",
-          progress.count(app.BAR_FILLED) == app.BAR_WIDTH
-          and app.BAR_EMPTY not in progress, progress)
 
     section("핸들러 — 거절 경로")
     for label, text, ents, expect in [
@@ -338,7 +393,7 @@ async def _handler_cases(app) -> None:
                       roster_error=RuntimeError("Forbidden"))
     await run_handler(app, ctx)
     check("명시적 태그만으로 진행",
-          any("🎯 **당첨**" in (m.text or "") for _, k, m in ctx.calls if k == "UPDATE"))
+          any("🎯 **당첨**" in panel for panel in ctx.panels("UPDATE")))
 
     # 로스터가 없으면 "id 가 로스터에 없음" 규칙이 모든 멘션을 전원으로 오인한다.
     # 실제 제품 버그였다. 원인을 알 수 있는 안내가 나가야 한다.
@@ -357,8 +412,8 @@ async def _handler_cases(app) -> None:
                       roster_error=RuntimeError("Forbidden"))
     await run_handler(app, ctx)
     check("로스터 실패 시 전원 모드 오인 없음",
-          any("🎯 **당첨**" in (m.text or "") for _, k, m in ctx.calls if k == "UPDATE")
-          and "채팅방 전원" not in "\n".join(ctx.texts()))
+          any("🎯 **당첨**" in panel for panel in ctx.panels("UPDATE"))
+          and "채팅방 전원" not in "\n".join(ctx.panels() + ctx.texts()))
 
 
 async def test_concurrency() -> None:
@@ -376,8 +431,9 @@ async def test_concurrency() -> None:
         await asyncio.gather(*(app.handle_message(c) for c in contexts))
         await wait_idle(app)
 
-    ran = [c for c in contexts if any("🎲" in (m.text or "") or "🥁" in (m.text or "")
-                                      for _, _, m in c.calls)]
+    # 진행 중인 판은 카드로, 거절 안내는 평문으로 나간다
+    ran = [c for c in contexts if any("🎲" in panel or "🥁" in panel
+                                      for panel in c.panels())]
     rejected = [c for c in contexts if any("이미 추첨이 진행 중" in (m.text or "")
                                            for _, _, m in c.calls)]
     check("동시 5건 중 정확히 1건만 진행", len(ran) == 1, f"진행 {len(ran)}건")
@@ -401,10 +457,10 @@ async def test_concurrency() -> None:
         await wait_idle(app)
 
     finished = [c for c in contexts
-                if any("🎯 **당첨**" in (m.text or "") for _, _, m in c.calls)]
+                if any("🎯 **당첨**" in panel for panel in c.panels())]
     check("5개 대화방 모두 독립적으로 완주", len(finished) == 5, f"완주 {len(finished)}건")
     check("대화방별 결과가 섞이지 않음",
-          all(len({m.text for _, _, m in c.calls if "🎯 **당첨**" in (m.text or "")}) == 1
+          all(len({p for p in c.panels() if "🎯 **당첨**" in p}) == 1
               for c in finished))
     check("모든 락 해제됨", not app._running, f"{app._running}")
 
@@ -441,11 +497,26 @@ async def test_timing() -> None:
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     total = stamps[-1]
     plan = R.plan([M.to_account(m) for m in small], 1)
-    lo = R.estimated_seconds(plan, R.TEASE_MIN)
-    hi = R.estimated_seconds(plan, R.TEASE_MAX)
-    check("총 소요가 예상 범위 안", lo - 1.0 <= total <= hi + 1.0,
+    lo, hi = R.estimated_bounds(plan)
+    check("총 소요가 예상 범위 안", lo - 0.5 <= total <= hi + 0.5,
           f"{total:.1f}초 (예상 {lo:.1f}~{hi:.1f}초)")
     check("편집 간격 1.0초 이상", min(gaps) >= 1.0, f"최소 {min(gaps):.2f}초")
+
+    # ── 대기가 실제로 흔들리는가 ────────────────────────────────
+    # 고정 대기면 몇 라운드 만에 다음 대사 시점을 학습해 버려 긴장이 사라진다.
+    # 검사할 성질은 "전부 다르다" 가 아니라 "고정이 아니다" 다.
+    # 0.1초 단위로 반올림하면 (1.0, 1.5) 범위는 버킷이 6개뿐이라 충돌이 정상이다.
+    rounded = {round(g, 1) for g in gaps}
+    spread = max(gaps) - min(gaps)
+    check("호출 간격이 고정이 아니다", len(rounded) >= 5 and spread > 0.5,
+          f"{len(gaps)}개 간격 중 {len(rounded)}종, 최대-최소 {spread:.2f}초")
+    for name in ("INTRO_HOLD", "DRUM_HOLD", "ANNOUNCE_HOLD", "TEASE_HOLD"):
+        low, high = getattr(R, name)
+        check(f"{name} 이 범위이고 최소 1.0초 이상", high > low and low >= 1.0,
+              f"({low}, {high})")
+    samples = {round(R.hold(R.DRUM_HOLD, __import__("random").Random(i)), 3)
+               for i in range(30)}
+    check("hold() 이 매번 다른 값을 낸다", len(samples) >= 28, f"{len(samples)}/30종")
     check("초당 호출 1.0회 미만", len(stamps) / total < 1.0, f"{len(stamps) / total:.2f}회/초")
     sends = sum(1 for _, k, _ in ctx.calls if k == "SEND")
     check("메시지 1개 유지", sends == 1, f"SEND {sends}회")

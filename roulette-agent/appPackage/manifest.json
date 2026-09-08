@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
   "manifestVersion": "1.29",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "id": "${{TEAMS_APP_ID}}",
   "developer": {
     "name": "김민지 (Minji Kim)",
@@ -46,11 +46,15 @@
           "commands": [
             {
               "title": "@당첨자뽑기 @홍길동 @김철수 2명",
-              "description": "후보들을 태그하고 뽑을 인원 수를 적으면 그 수만큼 추첨합니다."
+              "description": "후보들을 태그하고 뽑을 인원 수를 적으면 그 수만큼 추첨합니다.",
+              "type": "prompt",
+              "prompt": "@홍길동 @김철수 2명"
             },
             {
               "title": "@당첨자뽑기 @홍길동 @김철수 @이영희",
-              "description": "인원 수를 생략하면 1명을 추첨합니다."
+              "description": "인원 수를 생략하면 1명을 추첨합니다.",
+              "type": "prompt",
+              "prompt": "@홍길동 @김철수 @이영희"
             }
           ]
         },
