@@ -72,7 +72,7 @@
 |---|---|---|
 | `roulette` | `python app.py` (작업 디렉터리 `roulette-agent/src`) | `envFrom: secretRef teams-roulette` |
 | `vote` | `python app.py` (작업 디렉터리 `vote-agent/src`) | `envFrom: secretRef teams-vote`, `VOTE_DB_PATH=/data/votes.db` (`store.py`가 읽는 환경 변수) |
-| `tunnel` | `devtunnel host <터널 ID>` | 이미지에 devtunnel CLI를 넣는다. `HOME`을 볼륨 아래(예: `/data/devtunnel-home`)로 두어 로그인 정보가 재시작 뒤에도 남게 한다. 실제 저장 위치는 로그인 후 확인한다 |
+| `tunnel` | `devtunnel host <터널 ID>` | 이미지에 devtunnel CLI를 넣는다. `HOME`을 볼륨 아래(예: `/data/devtunnel-home`)로 두어 로그인 정보가 재시작 뒤에도 남게 한다. 실제 저장 위치는 로그인 후 확인한다 → 현재 디렉터리 아래였다(6절) |
 
 - 이미지는 하나로 만들고(Python 3.13 + 두 봇 코드 + devtunnel CLI) 컨테이너마다 `command`만 다르게 하면 단순하다.
 - 터널 ID에는 리전 접미사가 붙는다(`teams-agents.<리전>`). 조립하지 말고 `devtunnel list` 출력에서 복사해 설정값으로 넣는다(`scripts/_common.sh`의 경고와 같다).
@@ -116,7 +116,26 @@ kubectl --kubeconfig ~/.kube/ns-branch-graph-dev.yaml exec -it deploy/teams-agen
 
 **되돌리기:** `kubectl scale deploy/teams-agents --replicas=0` → Mac에서 `./scripts/startHost --bg && ./scripts/startRoulette --bg && ./scripts/startVote --bg`
 
-## 6. 주의
+## 6. 배포하며 확인한 것 (2026-10-16)
+
+위 4~5절은 배포 전에 쓴 제안이다. 실제로 배포해 보니 아래가 달랐거나 새로 확인됐다. 구현은 `Dockerfile`, `deploy/`에 반영했다.
+
+| 처음 생각한 것 | 실제 | 반영 |
+|---|---|---|
+| devtunnel CLI만 이미지에 넣으면 된다 | .NET 프로그램이라 **ICU가 없으면 시작하자마자 죽는다**(`Couldn't find a valid ICU package`) | `Dockerfile`에서 `libicu76` 설치. 패키지 이름에 버전이 붙으니 베이스 이미지(trixie)가 바뀌면 맞춰 고친다 |
+| `HOME`을 볼륨 아래로 두면 로그인 정보가 남는다 | 설정·토큰(`DevTunnels/devtunnels.json`, `devtunnels-tokens-microsoft`)은 HOME이 아니라 **현재 디렉터리** 아래에 쓴다. `/app`에서 실행하면 `Read-only file system : '/app/DevTunnels'`로 실패한다 | `deploy/devtunnel-shim.sh`가 `/usr/local/bin/devtunnel` 자리에서 항상 `$HOME`으로 이동해 실행한다. `kubectl exec`로 불러도 같은 위치를 쓴다 |
+| 로그인 전에는 tunnel 컨테이너가 재시작을 반복해도 된다 | CrashLoopBackOff에 빠지면 `kubectl exec`로 들어가 로그인할 수 없다 | `deploy/tunnel-entry.sh`가 `devtunnel host`가 끝나도 컨테이너를 살려 두고 30초마다 다시 시도한다. 로그인 전 로그에는 `Unauthorized`와 로그인 안내가 반복된다 |
+| 로그인 정보가 NFS 볼륨에서 유지되는지 모른다 | Pod를 재시작해도 로그인이 남고 터널이 바로 다시 붙는다 | — |
+
+그 밖에 확인한 것:
+- .NET이 처음 실행할 때 `$HOME/.net`에 약 46MB를 풀어 둔다(볼륨 1Gi 안에서 충분하다).
+- 시간대 데이터는 `python:3.13-slim`에 들어 있다. 투표 마감 해석(`Asia/Seoul`)에 추가 패키지가 필요 없다.
+- `.dockerignore`는 허용 목록 방식이다. `.env`와 `votes.db`는 빌드 컨텍스트에 들어갈 수 없다.
+- 터널 클라이언트 로그의 `ClientSSH: Session closed unexpectedly … ConnectionLost`는 들어온 연결 하나가 끊긴 것이다. host는 계속 살아 있으니 이 줄만으로 장애로 보지 않는다.
+- 배포는 `./deploy/k8s/release.sh`로 한다(테스트 → Secret 존재 확인 → 빌드·푸시 → 태그 교체 → apply → rollout).
+- 쿼터 사용량(branch-graph 포함): CPU 240m/2, 메모리 608Mi/4Gi, 저장소 6Gi/20Gi.
+
+## 7. 주의
 - **branch-graph는 팀이 쓰는 운영 서비스다.** `branch-graph` Deployment, Secret, PVC, Ingress는 건드리지 않는다. 쿼터를 함께 쓴다는 점도 기억한다.
 - Dev Tunnel은 Microsoft가 개발·테스트용으로 안내하는 서비스다(무료 한도 월 5GB, 분당 1500건). 지금도 같은 방식이라 위험이 새로 생기지는 않지만, 24시간 운영이 된다.
   - 장기적으로는 IT에 "봇 메시지 경로(`/api/messages`)만 외부 공개"를 요청하면 터널 없이 운영할 수 있다. 봇 SDK가 요청의 JWT를 검증하므로 안전하다.
