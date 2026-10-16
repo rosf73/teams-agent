@@ -1,0 +1,10 @@
+# votes.db 와 devtunnel 로그인 정보를 둔다. storageClassName 은 지정하지 않는다(클러스터 기본 nfs-csi).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: teams-agents-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

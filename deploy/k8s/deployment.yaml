@@ -1,0 +1,85 @@
+# 봇 2개 + devtunnel host 를 Pod 하나에 둔다 (docs/K8S-HANDOFF.md).
+# Service·Ingress 는 없다. 클러스터는 밖에서 들어올 수 없고, Teams 요청은 터널(나가는 연결)로만 온다.
+# 터널은 Pod 안의 localhost:3978/3979 로 넘겨준다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teams-agents
+spec:
+  replicas: 1
+  # 볼륨이 ReadWriteOnce 이고, 같은 터널을 두 곳에서 host 하면 안 된다. 그래서 한 번에 Pod 하나.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: teams-agents }
+  template:
+    metadata:
+      labels: { app: teams-agents }
+    spec:
+      imagePullSecrets: [{ name: harbor-alti-pull }]
+      automountServiceAccountToken: false
+      securityContext: { fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: roulette
+          image: docker.altimedia.com/branch-graph/teams-agents
+          workingDir: /app/roulette-agent/src
+          command: ["python", "app.py"]
+          envFrom: [{ secretRef: { name: teams-roulette } }]   # .env 값. PORT=3978 도 여기서 온다
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          securityContext: &hardened
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources: &bot
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          readinessProbe:
+            tcpSocket: { port: 3978 }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 3978 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 5
+        - name: vote
+          image: docker.altimedia.com/branch-graph/teams-agents
+          workingDir: /app/vote-agent/src
+          command: ["python", "app.py"]
+          envFrom: [{ secretRef: { name: teams-vote } }]   # .env 값. PORT=3979 도 여기서 온다
+          env:
+            - { name: VOTE_DB_PATH, value: /data/votes.db }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+          securityContext: *hardened
+          resources: *bot
+          readinessProbe:
+            tcpSocket: { port: 3979 }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 3979 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 5
+        - name: tunnel
+          image: docker.altimedia.com/branch-graph/teams-agents
+          command: ["/usr/local/bin/tunnel-entry.sh"]
+          env:
+            # 서비스가 붙인 ID 를 devtunnel list 출력에서 복사했다. 조립하지 않는다 (DEV_RULE 규칙 5).
+            - { name: TUNNEL_ID, value: teams-agents.jpe1 }
+            # 로그인 정보가 Pod 재시작 뒤에도 남도록 HOME 을 볼륨 아래에 둔다.
+            - { name: HOME, value: /data/devtunnel-home }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+          securityContext: *hardened
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: teams-agents-data }
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }

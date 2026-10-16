@@ -1,0 +1,9 @@
+# teams-agents 배포(ns-branch-graph-dev). branch-graph 와 네임스페이스·쿼터를 함께 쓴다.
+# Secret "teams-roulette", "teams-vote" 는 값이 있어 파일로 두지 않고 사용자가 클러스터에 직접 만든다
+# (docs/K8S-HANDOFF.md 4.3).
+resources:
+  - pvc.yaml
+  - deployment.yaml
+images:
+  - name: docker.altimedia.com/branch-graph/teams-agents
+    newTag: "20261016-1308"   # release.sh 가 날짜·시각 태그로 바꾼다. latest 는 쓰지 않는다

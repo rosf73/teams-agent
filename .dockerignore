@@ -1,0 +1,15 @@
+# 허용 목록 방식: 전부 제외하고 이미지에 필요한 것만 다시 넣는다.
+# .env(클라이언트 시크릿)·votes.db(사용자 이름)가 이미지에 실려 Harbor 로 올라가는 일을
+# 구조적으로 막기 위해서다 (docs/DEV_RULE.md 규칙 1). 값은 Secret 으로만 넣는다.
+*
+!roulette-agent/src/*.py
+!vote-agent/src/*.py
+!vote-agent/src/requirements.txt
+!deploy/tunnel-entry.sh
+!deploy/devtunnel-shim.sh
+
+# 위 허용 패턴에 우연히 걸리더라도 다시 뺀다 (뒤에 오는 규칙이 이긴다).
+**/.env
+**/.env.*
+**/data/
+**/__pycache__/
