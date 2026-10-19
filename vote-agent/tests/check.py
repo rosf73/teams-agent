@@ -7,6 +7,7 @@ DB 는 임시 파일을 쓰고 프로젝트의 data/votes.db 는 건드리지 �
 """
 
 import asyncio
+import logging
 import os
 import sys
 import tempfile
@@ -80,6 +81,9 @@ class FakeContext:
     """ctx.send / ctx.api.conversations.activities(...).update 를 기록한다."""
 
     _next_id = 0
+    # 모든 컨텍스트의 UPDATE 를 **일어난 순서대로** 모은다. 투표판 갱신은 응답 뒤
+    # 백그라운드에서 합쳐서 하므로, 어느 컨텍스트에 기록될지는 정해져 있지 않다.
+    updates: list = []
 
     def __init__(self, activity) -> None:
         self.activity = activity
@@ -89,6 +93,7 @@ class FakeContext:
         class Activities:
             async def update(self, activity_id, msg):
                 outer.calls.append(("UPDATE", activity_id, msg))
+                FakeContext.updates.append(msg)
 
         self.api = type("Api", (), {"conversations": type("Conv", (), {
             "activities": staticmethod(lambda cid: Activities()),
@@ -111,7 +116,16 @@ class FakeContext:
         return [(getattr(m, "text", None) or "") for _, _, m in self.calls]
 
 
-async def route(app_module, ctx):
+async def settle(app_module) -> None:
+    """응답 뒤로 미룬 투표판 갱신이 모두 끝날 때까지 기다린다."""
+    while True:
+        pending = [t for t in app_module._repaint_tasks.values() if not t.done()]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def route(app_module, ctx, wait_repaint: bool = True):
     """**라우터를 통해** 핸들러를 호출한다.
 
     핸들러 함수를 직접 부르면 라우팅 조건을 검사하지 못한다. 실제로
@@ -122,6 +136,8 @@ async def route(app_module, ctx):
     result = None
     for handler in handlers:
         result = await handler(ctx)
+    if wait_repaint:
+        await settle(app_module)
     return len(handlers), result
 
 
@@ -698,7 +714,7 @@ async def test_concurrency() -> None:
     check("참여자 20명 (중복 집계 없음)", fresh.voter_count == 20, f"{fresh.voter_count}명")
 
     # 락이 갱신 순서를 지켜야 한다. 마지막 갱신 카드가 최종 DB 상태와 일치해야 한다.
-    last_card = [m for c in ctxs for k, _, m in c.calls if k == "UPDATE"][-1]
+    last_card = FakeContext.updates[-1]
     final_text = card_text(last_card.attachments[0].content)
     check("마지막 갱신 카드가 최종 상태와 일치",
           "**10표**" in final_text and final_text.count("**10표**") == 2, final_text[:80])
@@ -1010,8 +1026,168 @@ async def test_anonymous_handler() -> None:
             app._timers[pid_].cancel()
 
 
+class FlakyContext(FakeContext):
+    """투표판 갱신(PUT)이 처음 `fail` 번 실패하는 컨텍스트.
+
+    2026-10-19 실제로 클러스터에서 Teams API 로 가는 TLS 연결이 실패했다(httpx.ConnectError).
+    """
+
+    def __init__(self, activity, fail: int = 1) -> None:
+        super().__init__(activity)
+        import httpx
+
+        outer, left = self, [fail]
+
+        class Activities:
+            async def update(self, activity_id, msg):
+                if left[0] > 0:
+                    left[0] -= 1
+                    raise httpx.ConnectError("TLS 연결 실패 (테스트)")
+                outer.calls.append(("UPDATE", activity_id, msg))
+
+        self.api = type("Api", (), {"conversations": type("Conv", (), {
+            "activities": staticmethod(lambda cid: Activities()),
+        })()})()
+
+
+class LogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+
+    def emit(self, record) -> None:
+        self.lines.append(record.getMessage())
+
+
+async def test_vote_resend() -> None:
+    import app
+
+    section("투표 — 재전송은 표를 다시 뒤집지 않는다 (2026-10-19 장애)")
+    capture = LogCapture()
+    app.logger.addHandler(capture)
+    try:
+        ctx = FakeContext(message("점심\n김밥\n라면"))
+        await app.handle_message(ctx)
+        board = ctx.cards()[0]
+        poll_id = action_data(board.actions[0]).get("p")
+
+        # 1) 사용자가 '라면'을 누른다. 투표판 갱신이 한 번 실패한다 (TLS 연결 실패).
+        click = invoke_from_card(board, 1, who="bob")
+        flaky = FlakyContext(click, fail=1)
+        _, result = await route(app, flaky)
+        check("갱신이 실패해도 클릭한 사람은 바로 정상 응답을 받는다",
+              "'라면' 에 투표했습니다" in str(result.value), str(result.value))
+        check("표는 저장됐다", app.store.get_poll(poll_id).options[1].count == 1)
+        check("갱신 실패를 로그에 남긴다 (예외 종류 포함)",
+              any("투표판 갱신 실패" in l and "ConnectError" in l for l in capture.lines),
+              str([l for l in capture.lines if "갱신" in l]))
+        check("실패한 갱신은 다시 시도해서 결국 그린다",
+              [k for k, _, _ in flaky.calls] == ["UPDATE"]
+              and "**1표**" in card_text(flaky.cards()[-1]), str(flaky.calls))
+
+        # 2) Teams 가 **같은 invoke** 를 다시 보낸다.
+        resend = FakeContext(click)
+        _, result = await route(app, resend)
+        check("재전송은 표를 다시 뒤집지 않는다",
+              app.store.get_poll(poll_id).options[1].count == 1,
+              f"라면 {app.store.get_poll(poll_id).options[1].count}표")
+        check("재전송에는 처음 결과 문구를 돌려준다",
+              "'라면' 에 투표했습니다" in str(result.value), str(result.value))
+        check("재전송 때도 투표판을 다시 그린다",
+              [k for k, _, _ in resend.calls] == ["UPDATE"])
+        check("재전송을 로그로 구분한다", any("재전송" in l for l in capture.lines))
+
+        # 3) 사용자가 **새로** 다시 누르면 평소처럼 취소된다.
+        _, result = await route(app, FakeContext(invoke_from_card(board, 1, who="bob")))
+        check("새 클릭은 평소처럼 토글된다",
+              "취소했습니다" in str(result.value)
+              and app.store.get_poll(poll_id).options[1].count == 0, str(result.value))
+
+        check("투표판 갱신 시간을 로그에 남긴다",
+              any("투표판 갱신 poll=" in l and "s" in l for l in capture.lines))
+        check("투표 로그에 요청 ID와 처리 시간이 있다",
+              any(l.startswith("투표 poll=") and "act=" in l and "s" in l.split()[-1]
+                  for l in capture.lines),
+              str([l for l in capture.lines if l.startswith("투표 poll=")][-1:]))
+    finally:
+        app.logger.removeHandler(capture)
+        if poll_id in app._timers:
+            app._timers[poll_id].cancel()
+
+
+async def test_vote_responds_before_repaint() -> None:
+    import app
+
+    section("투표 — 응답은 투표판 갱신을 기다리지 않는다 (2026-10-19 장애)")
+    ctx = FakeContext(message("저녁\n국밥\n냉면"))
+    await app.handle_message(ctx)
+    board = ctx.cards()[0]
+    poll_id = action_data(board.actions[0]).get("p")
+
+    # Teams API 가 응답하지 않는 상황. 예전에는 이 동안 클릭 응답도 막혀 "문제가 발생했습니다" 가 떴다.
+    gate = asyncio.Event()
+
+    class Stuck(FakeContext):
+        def __init__(self, activity) -> None:
+            super().__init__(activity)
+            outer = self
+
+            class Activities:
+                async def update(self, activity_id, msg):
+                    await gate.wait()
+                    outer.calls.append(("UPDATE", activity_id, msg))
+                    FakeContext.updates.append(msg)
+
+            self.api = type("Api", (), {"conversations": type("Conv", (), {
+                "activities": staticmethod(lambda cid: Activities()),
+            })()})()
+
+    stuck = Stuck(invoke_from_card(board, 0, who="alice"))
+    try:
+        _, result = await asyncio.wait_for(route(app, stuck, wait_repaint=False), timeout=1)
+        answered = True
+    except asyncio.TimeoutError:
+        answered, result = False, None
+    check("Teams API 가 멈춰 있어도 바로 응답한다", answered)
+    check("응답은 실제 결과 문구", "'국밥' 에 투표했습니다" in str(getattr(result, "value", "")),
+          str(getattr(result, "value", "")))
+    check("응답 시점에는 아직 갱신 전", stuck.calls == [])
+    gate.set()
+    await settle(app)
+    check("뒤이어 투표판이 갱신된다", [k for k, _, _ in stuck.calls] == ["UPDATE"])
+
+    section("투표 — 갱신이 계속 실패하면 몇 번 시도 후 포기한다")
+    capture = LogCapture()
+    app.logger.addHandler(capture)
+    try:
+        hopeless = FlakyContext(invoke_from_card(board, 1, who="bob"), fail=99)
+        _, result = await route(app, hopeless)
+        check("그래도 클릭한 사람은 정상 응답", "'냉면' 에 투표했습니다" in str(result.value))
+        failures = [l for l in capture.lines if "투표판 갱신 실패" in l]
+        check(f"최대 {app.REPAINT_ATTEMPTS}번 시도", len(failures) == app.REPAINT_ATTEMPTS,
+              f"{len(failures)}번")
+        check("포기를 로그에 남긴다", any("투표판 갱신 포기" in l for l in capture.lines))
+        check("표는 저장돼 있다", app.store.get_poll(poll_id).options[1].count == 1)
+    finally:
+        app.logger.removeHandler(capture)
+
+    section("투표 — 늦게 끝난 갱신이 마감판을 덮지 않는다")
+    # 투표 직후 마감. 투표의 백그라운드 갱신이 마감 뒤에 실행돼도 마감판(버튼 없음)이 남아야 한다.
+    vote_then_close = FakeContext(invoke_from_card(board, 0, who="bob"))
+    await route(app, vote_then_close, wait_repaint=False)
+    await route(app, FakeContext(invoke_from_card(board, 2, who="owner")), wait_repaint=False)
+    await settle(app)
+    last = FakeContext.updates[-1].attachments[0].content
+    check("마지막으로 그린 것은 마감판", "마감됨" in card_text(last) and not last.actions,
+          card_text(last)[:60])
+    if poll_id in app._timers:
+        app._timers[poll_id].cancel()
+
+
 async def main() -> int:
     print("vote-agent 검증\n")
+    import app
+    app.REPAINT_RETRY_DELAY = 0
     test_compat()
     test_parsing()
     test_store()
@@ -1020,6 +1196,8 @@ async def main() -> int:
     await test_routing()
     await test_handler()
     await test_anonymous_handler()
+    await test_vote_resend()
+    await test_vote_responds_before_repaint()
     await test_concurrency()
     await test_timer()
     print(f"\n{'=' * 62}\n통과 {len(PASS)}건 / 실패 {len(FAIL)}건")

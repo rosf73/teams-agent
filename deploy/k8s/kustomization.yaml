@@ -6,4 +6,4 @@ resources:
   - deployment.yaml
 images:
   - name: docker.altimedia.com/branch-graph/teams-agents
-    newTag: "20261019-1531"   # release.sh 가 날짜·시각 태그로 바꾼다. latest 는 쓰지 않는다
+    newTag: "20261019-1756"   # release.sh 가 날짜·시각 태그로 바꾼다. latest 는 쓰지 않는다

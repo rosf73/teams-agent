@@ -15,6 +15,7 @@ LLM 을 쓰지 않는다. 마감 표현은 정규식으로 해석하고, 애매�
 import asyncio
 import hashlib
 import logging
+import time
 from collections import OrderedDict
 
 import cards
@@ -50,6 +51,21 @@ _SEEN_LIMIT = 500
 # 투표별 락. 동시 클릭의 read-modify-write 경합을 막는다.
 _locks: dict[str, asyncio.Lock] = {}
 
+# 투표 클릭(invoke) activity.id → 그때 돌려준 결과 문구.
+# 핸들러가 500 을 내면 Teams 가 **같은 invoke 를 다시 보낸다**(DEV_RULE 8절). 투표는 토글이라
+# 다시 처리하면 표가 뒤집힌다. 2026-10-19 투표판 갱신이 TLS 연결 실패로 500 이 나자,
+# 재전송이 방금 저장한 표를 취소해 버리고 "취소했습니다" 를 띄웠다.
+_vote_results: OrderedDict[str, str] = OrderedDict()
+
+# 투표판 갱신은 클릭 응답 **뒤에** 한다. Teams API 가 느리거나 실패해도 클릭한 사람은
+# 바로 결과를 받는다 (2026-10-19 장애: 갱신이 늦어 응답 전에 Teams 가 끊고 "문제가 발생했습니다").
+# 그릴 때마다 DB 최신 상태를 읽으므로, 밀린 갱신은 한 번으로 합친다.
+REPAINT_ATTEMPTS = 3
+REPAINT_RETRY_DELAY = 1.0  # 초. n 번째 실패 뒤 n 배 기다린다.
+_paint_locks: dict[str, asyncio.Lock] = {}
+_repaint_tasks: dict[str, asyncio.Task] = {}
+_repaint_pending: set[str] = set()
+
 # 마감 타이머. 프로세스가 죽으면 사라지므로 지연 검사와 함께 쓴다.
 _timers: dict[str, asyncio.Task] = {}
 
@@ -84,6 +100,44 @@ def _already_handled(activity_id: str | None) -> bool:
     return False
 
 
+def _remember_vote(activity_id: str | None, message: str) -> None:
+    if not activity_id:
+        return
+    _vote_results[activity_id] = message
+    while len(_vote_results) > _SEEN_LIMIT:
+        _vote_results.popitem(last=False)
+
+
+def _schedule_repaint(ctx, poll_id: str) -> None:
+    """투표판 갱신을 응답 뒤로 미룬다. 이미 진행 중이면 한 번 더 그리도록 표시만 한다."""
+    _repaint_pending.add(poll_id)
+    task = _repaint_tasks.get(poll_id)
+    if task is None or task.done():
+        _repaint_tasks[poll_id] = asyncio.create_task(_repaint_worker(ctx, poll_id))
+
+
+async def _repaint_worker(ctx, poll_id: str) -> None:
+    failures = 0
+    while poll_id in _repaint_pending:
+        _repaint_pending.discard(poll_id)
+        poll = store.get_poll(poll_id)
+        if poll is None:
+            return
+        try:
+            await _repaint(ctx, poll)
+            failures = 0
+        except Exception:
+            # 실패 내용은 _put_card 가 남겼다.
+            failures += 1
+            if failures >= REPAINT_ATTEMPTS:
+                # 표는 이미 저장돼 있다. 다음 투표나 마감 때 최신 상태로 다시 그려진다.
+                _repaint_pending.discard(poll_id)
+                logger.error("투표판 갱신 포기 poll=%s (%d번 실패)", poll_id, failures)
+                return
+            _repaint_pending.add(poll_id)
+            await asyncio.sleep(REPAINT_RETRY_DELAY * failures)
+
+
 def _lock(poll_id: str) -> asyncio.Lock:
     return _locks.setdefault(poll_id, asyncio.Lock())
 
@@ -105,6 +159,9 @@ def _forget(poll_id: str) -> None:
     """
     _locks.pop(poll_id, None)
     _timers.pop(poll_id, None)
+    lock = _paint_locks.get(poll_id)
+    if lock is not None and not lock.locked():
+        _paint_locks.pop(poll_id, None)
 
 
 def _ack(text: str) -> AdaptiveCardActionMessageResponse:
@@ -114,12 +171,31 @@ def _ack(text: str) -> AdaptiveCardActionMessageResponse:
 
 
 async def _repaint(ctx, poll: Poll) -> None:
-    """투표판을 다시 그린다. 채팅방 전원의 화면이 함께 바뀐다."""
+    """투표판을 다시 그린다. 채팅방 전원의 화면이 함께 바뀐다.
+
+    한 투표판은 한 번에 하나씩, **그리는 순간의 DB 상태로** 그린다. 그래야 늦게 끝난
+    갱신이 더 새 상태(예: 마감판)를 예전 상태로 덮어쓰지 않는다.
+    """
+    async with _paint_locks.setdefault(poll.id, asyncio.Lock()):
+        poll = store.get_poll(poll.id) or poll
+        await _put_card(ctx, poll)
+
+
+async def _put_card(ctx, poll: Poll) -> None:
     if not poll.activity_id:
         logger.warning("activity_id 가 없어 갱신을 건너뜀 poll=%s", poll.id)
         return
-    await ctx.api.conversations.activities(poll.conversation_id).update(
-        poll.activity_id, MessageActivityInput().add_card(cards.poll_card(poll)))
+    # Teams API 호출이 느리거나 실패하면 클릭 응답이 늦어져 "문제가 발생했습니다" 가 뜬다.
+    # 얼마나 자주 그런지 보려고 시간과 실패를 남긴다 (2026-10-19 장애).
+    started = time.monotonic()
+    try:
+        await ctx.api.conversations.activities(poll.conversation_id).update(
+            poll.activity_id, MessageActivityInput().add_card(cards.poll_card(poll)))
+    except Exception as exc:
+        logger.warning("투표판 갱신 실패 poll=%s %.2fs %s: %s",
+                       poll.id, time.monotonic() - started, type(exc).__name__, exc)
+        raise
+    logger.info("투표판 갱신 poll=%s %.2fs", poll.id, time.monotonic() - started)
 
 
 def _schedule_close(ctx, poll: Poll) -> None:
@@ -275,11 +351,19 @@ async def handle_vote(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     author = activity.from_
     voter_id = author.id if author else "unknown"
     voter_name = (author.name if author else None) or "알 수 없음"
+    started = time.monotonic()
 
     async with _lock(poll_id):
         poll = store.get_poll(poll_id)
         if poll is None:
             return _ack("이 투표를 찾을 수 없습니다. 새로 만들어 주세요.")
+
+        previous = _vote_results.get(activity.id) if activity.id else None
+        if previous is not None:
+            # 표는 처음 요청에서 이미 저장됐다. 투표판만 다시 그리고 같은 문구를 돌려준다.
+            logger.info("재전송 감지 — 표는 그대로 poll=%s act=%s", poll_id, _who(activity.id))
+            _schedule_repaint(ctx, poll_id)
+            return _ack(previous)
 
         poll = await _close_if_expired(ctx, poll)
         if poll.closed:
@@ -287,11 +371,13 @@ async def handle_vote(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
             return _ack("이미 마감된 투표입니다.")
 
         message = store.toggle_vote(poll, option_idx, voter_id, voter_name)
-        fresh = store.get_poll(poll_id) or poll
-        await _repaint(ctx, fresh)
+        # 저장 직후에 기록한다. 응답이 Teams 에 닿지 못해 재전송이 와도 다시 토글하지 않게.
+        _remember_vote(activity.id, message)
+        _schedule_repaint(ctx, poll_id)
 
     # 실명 대신 익명 해시를 남긴다.
-    logger.info("투표 poll=%s idx=%s user=%s", poll_id, option_idx, _who(voter_id))
+    logger.info("투표 poll=%s idx=%s user=%s act=%s %.2fs", poll_id, option_idx,
+                _who(voter_id), _who(activity.id or ""), time.monotonic() - started)
     return _ack(message)
 
 
