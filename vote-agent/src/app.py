@@ -138,6 +138,14 @@ async def _repaint_worker(ctx, poll_id: str) -> None:
             await asyncio.sleep(REPAINT_RETRY_DELAY * failures)
 
 
+def _choices_text(poll_id: str, user_id: str) -> str:
+    """`현재 선택: 1번째, 3번째`. 항목 이름은 길어서 순번만 쓴다."""
+    picked = store.choices_of(poll_id, user_id)
+    if not picked:
+        return "현재 선택: 없음"
+    return "현재 선택: " + ", ".join(f"{i + 1}번째" for i in picked)
+
+
 def _lock(poll_id: str) -> asyncio.Lock:
     return _locks.setdefault(poll_id, asyncio.Lock())
 
@@ -371,6 +379,7 @@ async def handle_vote(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
             return _ack("이미 마감된 투표입니다.")
 
         message = store.toggle_vote(poll, option_idx, voter_id, voter_name)
+        message = f"{message} ({_choices_text(poll_id, voter_id)})"
         # 저장 직후에 기록한다. 응답이 Teams 에 닿지 못해 재전송이 와도 다시 토글하지 않게.
         _remember_vote(activity.id, message)
         _schedule_repaint(ctx, poll_id)
@@ -379,6 +388,22 @@ async def handle_vote(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     logger.info("투표 poll=%s idx=%s user=%s act=%s %.2fs", poll_id, option_idx,
                 _who(voter_id), _who(activity.id or ""), time.monotonic() - started)
     return _ack(message)
+
+
+@app.on_card_action_execute(cards.VERB_MINE)
+async def handle_mine(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
+    """★ 내 선택 보기. 표와 투표판은 건드리지 않고, 누른 사람에게만 보여준다."""
+    activity = ctx.activity
+    poll_id = str((activity.value.action.data or {}).get("p") or "")
+    author = activity.from_
+    user_id = author.id if author else "unknown"
+
+    if store.get_poll(poll_id) is None:
+        return _ack("이 투표를 찾을 수 없습니다.")
+    logger.info("내 선택 보기 poll=%s user=%s", poll_id, _who(user_id))
+    if not store.choices_of(poll_id, user_id):
+        return _ack("아직 선택한 항목이 없습니다.")
+    return _ack(_choices_text(poll_id, user_id))
 
 
 @app.on_card_action_execute(cards.VERB_CLOSE)

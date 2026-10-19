@@ -235,6 +235,13 @@ class Store:
         moved = (not poll.multi_select) and bool(chosen)
         return f"'{label}' 으로 변경했습니다." if moved else f"'{label}' 에 투표했습니다."
 
+    def choices_of(self, poll_id: str, user_id: str) -> list[int]:
+        """이 사람이 고른 항목 번호(0부터), 오름차순."""
+        rows = self._conn.execute(
+            "SELECT option_idx FROM votes WHERE poll_id = ? AND user_id = ? ORDER BY option_idx",
+            (poll_id, user_id)).fetchall()
+        return [r["option_idx"] for r in rows]
+
     # ── 보존정책 ──────────────────────────────────────────────────
     def purge_old(self, *, closed_days: float = CLOSED_RETENTION_DAYS,
                   open_days: float = OPEN_RETENTION_DAYS,

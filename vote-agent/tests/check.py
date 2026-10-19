@@ -1184,6 +1184,86 @@ async def test_vote_responds_before_repaint() -> None:
         app._timers[poll_id].cancel()
 
 
+async def test_my_choice() -> None:
+    import app
+
+    section("내 선택 — 투표 응답 끝에 현재 선택 (순번만)")
+    ctx = FakeContext(message("점심\n김밥\n라면\n덮밥\n복수"))
+    await app.handle_message(ctx)
+    board = ctx.cards()[0]
+    poll_id = action_data(board.actions[0]).get("p")
+    check("실명 투표에는 내 선택 보기 버튼이 없다",
+          [a[1] for a in card_actions(board)] == ["vote", "vote", "vote", "close"],
+          str(card_actions(board)))
+
+    _, r1 = await route(app, FakeContext(invoke_from_card(board, 0, who="alice")))
+    check("투표하면 현재 선택을 붙인다",
+          str(r1.value) == "'김밥' 에 투표했습니다. (현재 선택: 1번째)", str(r1.value))
+    _, r2 = await route(app, FakeContext(invoke_from_card(board, 2, who="alice")))
+    check("복수 선택은 순번을 오름차순으로",
+          str(r2.value).endswith("(현재 선택: 1번째, 3번째)"), str(r2.value))
+    _, r3 = await route(app, FakeContext(invoke_from_card(board, 0, who="alice")))
+    check("취소해도 남은 선택을 보여준다",
+          str(r3.value) == "'김밥' 선택을 취소했습니다. (현재 선택: 3번째)", str(r3.value))
+    _, r4 = await route(app, FakeContext(invoke_from_card(board, 2, who="alice")))
+    check("모두 취소하면 없음", str(r4.value).endswith("(현재 선택: 없음)"), str(r4.value))
+
+    single = FakeContext(message("저녁\n국밥\n냉면"))
+    await app.handle_message(single)
+    sboard = single.cards()[0]
+    await route(app, FakeContext(invoke_from_card(sboard, 0, who="bob")))
+    _, moved = await route(app, FakeContext(invoke_from_card(sboard, 1, who="bob")))
+    check("단일 선택에서 옮기면 옮긴 순번만",
+          str(moved.value) == "'냉면' 으로 변경했습니다. (현재 선택: 2번째)", str(moved.value))
+
+    section("내 선택 — 익명 투표의 ★ 내 선택 보기 버튼")
+    anon = FakeContext(message("팀장 평가\n좋음\n보통\n나쁨\n복수\n익명"))
+    await app.handle_message(anon)
+    aboard = anon.cards()[0]
+    apoll = action_data(aboard.actions[0]).get("p")
+    acts = card_actions(aboard)
+    check("버튼 순서: 항목들 → ★ 내 선택 보기 → 마감",
+          acts == [("좋음", "vote"), ("보통", "vote"), ("나쁨", "vote"),
+                   ("★ 내 선택 보기", "mine"), ("투표 마감하기", "close")], str(acts))
+    mine_action = aboard.actions[3]
+    check("내 선택 보기는 바깥(…메뉴가 아님)",
+          getattr(mine_action, "mode", None) in (None, "primary"),
+          str(getattr(mine_action, "mode", None)))
+
+    def mine(who: str):
+        return FakeContext(invoke_from_card(aboard, 3, who=who))
+
+    nothing = mine("bob")
+    matched, r = await route(app, nothing)
+    check("라우터를 통해 내 선택 핸들러 도달", matched == 1, f"{matched}개")
+    check("아직 안 했으면 안내", str(r.value) == "아직 선택한 항목이 없습니다.", str(r.value))
+
+    await route(app, FakeContext(invoke_from_card(aboard, 0, who="bob")))
+    await route(app, FakeContext(invoke_from_card(aboard, 2, who="bob")))
+    before = app.store.get_poll(apoll)
+    peek = mine("bob")
+    _, r = await route(app, peek)
+    check("내 선택을 순번으로 보여준다", str(r.value) == "현재 선택: 1번째, 3번째", str(r.value))
+    after = app.store.get_poll(apoll)
+    check("보기만 한다 — 표가 바뀌지 않는다",
+          [o.count for o in before.options] == [o.count for o in after.options])
+    check("보기만 한다 — 투표판을 다시 그리지 않는다", peek.calls == [], str(peek.calls))
+    _, other = await route(app, mine("alice"))
+    check("다른 사람의 선택은 보이지 않는다", str(other.value) == "아직 선택한 항목이 없습니다.",
+          str(other.value))
+
+    app.store.close_poll(apoll)
+    closed_card = cards.poll_card(app.store.get_poll(apoll))
+    check("마감판에는 버튼이 없다", not closed_card.actions)
+    _, late = await route(app, mine("bob"))
+    check("마감 전 카드에서 눌러도 보여준다", str(late.value) == "현재 선택: 1번째, 3번째",
+          str(late.value))
+
+    for pid in (poll_id, apoll, action_data(sboard.actions[0]).get("p")):
+        if pid in app._timers:
+            app._timers[pid].cancel()
+
+
 async def main() -> int:
     print("vote-agent 검증\n")
     import app
@@ -1198,6 +1278,7 @@ async def main() -> int:
     await test_anonymous_handler()
     await test_vote_resend()
     await test_vote_responds_before_repaint()
+    await test_my_choice()
     await test_concurrency()
     await test_timer()
     print(f"\n{'=' * 62}\n통과 {len(PASS)}건 / 실패 {len(FAIL)}건")

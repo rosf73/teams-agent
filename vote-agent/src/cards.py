@@ -32,11 +32,13 @@ BAR_EMPTY = "▱"
 ACTION_VOTE = "vote"
 ACTION_CLOSE = "close"
 ACTION_CREATE = "create"
+ACTION_MINE = "mine"
 
 # 이전 이름 호환
 VERB_VOTE = ACTION_VOTE
 VERB_CLOSE = ACTION_CLOSE
 VERB_CREATE = ACTION_CREATE
+VERB_MINE = ACTION_MINE
 
 
 def _action(name: str, **payload) -> dict:
@@ -133,6 +135,13 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
             actions.append(C.ExecuteAction(
                 title=option.label, verb=ACTION_VOTE,
                 data=_action(ACTION_VOTE, p=poll.id, i=option.idx)))
+        if poll.anonymous:
+            # 익명 투표는 카드에 이름이 없어 내가 뭘 골랐는지 알 수 없다는 보고가 있었다(2026-10-19).
+            # 누른 사람에게만 보이는 안내로 알려준다. 항목 버튼과 헷갈리지 않게 ★ 를 붙이고,
+            # 눈에 띄도록 … 메뉴(secondary)가 아니라 바깥에 둔다.
+            actions.append(C.ExecuteAction(
+                title="★ 내 선택 보기", verb=ACTION_MINE,
+                data=_action(ACTION_MINE, p=poll.id)))
         # secondary 로 두면 오버플로 메뉴로 밀려서 투표 버튼과 섞이지 않는다.
         actions.append(C.ExecuteAction(
             title="투표 마감하기", verb=ACTION_CLOSE,
