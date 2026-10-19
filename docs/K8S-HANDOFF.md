@@ -94,7 +94,7 @@ kubectl --kubeconfig ~/.kube/ns-branch-graph-dev.yaml create secret generic team
 ```bash
 kubectl --kubeconfig ~/.kube/ns-branch-graph-dev.yaml exec -it deploy/teams-agents -c tunnel -- devtunnel user login -d
 ```
-기기 코드가 나오면 브라우저에서 로그인한다. 로그인 정보는 볼륨에 남는다. 로그인이 만료되면(오래 안 쓰거나 회사 정책) 봇이 **아무 오류 없이 무응답**이 된다(`startHost` 주석과 같은 증상). 그때는 이 명령으로 다시 로그인한다.
+기기 코드가 나오면 브라우저에서 로그인한다. 로그인 정보는 볼륨에 남는다. 로그인이 만료되면(오래 안 쓰거나 회사 정책) 봇이 **아무 오류 없이 무응답**이 된다(`startHost` 주석과 같은 증상). 그때는 이 명령으로 다시 로그인한다. 로그인이 유효한데 무응답인 경우도 있었다(7절, host 프로세스 멈춤).
 
 ### 4.5 보안·운영 기준 (branch-graph에서 쓰는 것과 같게)
 - `automountServiceAccountToken: false`, Pod `seccompProfile: RuntimeDefault`, `fsGroup`
@@ -135,7 +135,35 @@ kubectl --kubeconfig ~/.kube/ns-branch-graph-dev.yaml exec -it deploy/teams-agen
 - 배포는 `./deploy/k8s/release.sh`로 한다(테스트 → Secret 존재 확인 → 빌드·푸시 → 태그 교체 → apply → rollout).
 - 쿼터 사용량(branch-graph 포함): CPU 240m/2, 메모리 608Mi/4Gi, 저장소 6Gi/20Gi.
 
-## 7. 주의
+## 7. 장애 기록
+
+### 2026-10-17 ~ 10-19: 터널 host가 살아 있는 채로 멈춤 (약 1.5일 무응답)
+
+**증상.** Teams에서 `@당첨자뽑기`를 불러도 반응이 없었다. Pod는 3/3 Running, 재시작 0회였고 봇 두 개도 정상이었다. 봇 로그의 마지막 요청은 10/16이었다.
+
+**원인.** 10/17 14:44 UTC(23:44 KST)에 relay 연결이 끊겼다(`Connection to host tunnel relay closed`). 이런 끊김은 그 전에도 하루 몇 번씩 있었고 매번 스스로 다시 붙었다. 이번에는 다시 붙기 전에 토큰을 갱신하다가 401을 받았다.
+```
+devtunnel: Error connecting host tunnel session: Not authorizedUnauthorized. Refreshed tunnel access token is not valid.
+```
+그 뒤 `devtunnel host` 프로세스는 **종료하지도 다시 시도하지도 않고 떠 있기만 했다.** 프로세스가 끝나지 않아 `tunnel-entry.sh`의 재시도 루프도 돌지 않았다. 로그인은 유효했다(`devtunnel user show`, `devtunnel show` 모두 정상). 토큰 갱신이 왜 401을 받았는지는 확인하지 못했다.
+
+**진단.** 핵심은 터널에 붙은 host 수다.
+```bash
+kubectl exec deploy/teams-agents -c tunnel -- devtunnel show teams-agents.jpe1 | grep "Host connections"
+```
+`Host connections : 0`인데 로그인이 유효하면 host 프로세스가 멈춘 것이다. 로그인이 풀린 경우(4.4절)와 증상은 같지만 조치가 다르다.
+
+**복구.** 멈춘 host 프로세스만 종료했다. `tunnel-entry.sh`가 30초 안에 다시 띄웠고 Pod는 재시작하지 않았다. 이미지에 `kill` 실행 파일이 없어서 셸 내장 명령으로 보낸다.
+```bash
+kubectl exec deploy/teams-agents -c tunnel -- sh -c 'kill <devtunnel host PID>'   # PID는 /proc/*/cmdline에서 "devtunnel host"를 찾는다
+```
+
+**재발 방지.** tunnel 컨테이너에 liveness probe를 붙였다(`deploy/k8s/deployment.yaml`). `devtunnel show`로 host 수를 보고 0이면 실패로 친다.
+- 주기는 30분, 2회 연속 실패 시 재시작한다. 같은 일이 생기면 **최대 약 1시간 뒤** 스스로 복구된다. 5분 주기도 비용은 무시할 수준(한 번에 13~15초, 메모리 최대 95MiB)이었고, 사용자가 30분 × 2회를 골랐다.
+- 더 빨리 복구해야 하면 위 복구 명령을 직접 쓴다.
+- 로그인이 풀린 경우에는 probe가 재시작을 반복해도 고쳐지지 않는다. 4.4절의 명령으로 다시 로그인한다.
+
+## 8. 주의
 - **branch-graph는 팀이 쓰는 운영 서비스다.** `branch-graph` Deployment, Secret, PVC, Ingress는 건드리지 않는다. 쿼터를 함께 쓴다는 점도 기억한다.
 - Dev Tunnel은 Microsoft가 개발·테스트용으로 안내하는 서비스다(무료 한도 월 5GB, 분당 1500건). 지금도 같은 방식이라 위험이 새로 생기지는 않지만, 24시간 운영이 된다.
   - 장기적으로는 IT에 "봇 메시지 경로(`/api/messages`)만 외부 공개"를 요청하면 터널 없이 운영할 수 있다. 봇 SDK가 요청의 JWT를 검증하므로 안전하다.

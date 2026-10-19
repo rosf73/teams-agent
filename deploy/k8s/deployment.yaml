@@ -77,7 +77,18 @@ spec:
           securityContext: *hardened
           resources:
             requests: { cpu: 20m, memory: 64Mi }
-            limits: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: 200m, memory: 256Mi }   # host ~75Mi + 아래 probe 실행 중 최대 95Mi(2026-10-19 측정)
+          # devtunnel host 는 프로세스가 살아 있는 채로 일을 멈출 수 있다. 2026-10-17 relay 연결이 끊긴 뒤
+          # 토큰 갱신이 401 을 받자 종료도 재시도도 하지 않아 약 1.5일 동안 무응답이었다(로그인은 유효했다).
+          # 그래서 서비스에 붙은 host 수를 직접 보고, 0 이면 컨테이너를 재시작한다.
+          # 주기는 사용자가 정했다: 30분 × 2회 → 멈추고 최대 약 1시간 뒤 복구.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "devtunnel show \"$TUNNEL_ID\" | grep -Eq 'Host connections +: *[1-9]'"]
+            initialDelaySeconds: 120
+            periodSeconds: 1800
+            timeoutSeconds: 60   # .NET 시작 + API 호출로 한 번에 13~15초 걸린다
+            failureThreshold: 2
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: teams-agents-data }
