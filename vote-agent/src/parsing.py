@@ -17,6 +17,7 @@
     무슨식당 (https://naver.me/Fk738sTW)
     마감: 금요일 18시                          <- 지시어
     복수
+    익명
 
 제목만 오면 **폼을 제목 채워서 연다.** 파싱할 것이 없으니 위험도 없다.
 Teams 가 줄바꿈을 삼켜서 한 줄로 오더라도 이 경로로 떨어지므로 조용히 잘못
@@ -41,11 +42,14 @@ MAX_TITLE = 80
 MAX_LABEL = 60
 
 MULTI_WORDS = ("복수", "다중", "multi", "여러")
+ANON_WORDS = ("익명", "무기명", "anonymous")
 
 # 지시어 줄. 나머지 줄은 모두 항목으로 본다.
 DEADLINE_LINE = re.compile(r"^(?:마감|마감일|마감시각|deadline|due)\s*[:：]\s*(.*)$", re.IGNORECASE)
 MULTI_LINE = re.compile(r"^(?:복수|복수선택|다중|다중선택|중복|multi|multiple)"
                         r"\s*(?:선택|가능|허용)?\s*$", re.IGNORECASE)
+# 줄 전체가 지시어일 때만 본다. `익명 게시판 만들기` 같은 항목을 지시어로 먹으면 안 된다.
+ANON_LINE = re.compile(r"^(?:익명|무기명|anonymous)\s*(?:투표|선택)?\s*$", re.IGNORECASE)
 
 # "1/5" 를 12월에 적으면 내년으로 보지만, 하루 이틀 지난 날짜는 오타로 보고 거절한다.
 YEAR_ROLLOVER_DAYS = 60
@@ -188,6 +192,7 @@ class Request:
     title: str = ""
     options: list[str] = field(default_factory=list)
     multi_select: bool = False
+    anonymous: bool = False
     closes_at: datetime | None = None
     deadline_text: str = ""
     error: str | None = None
@@ -242,12 +247,13 @@ def parse_request(text: str) -> Request:
     if len(lines) == 1:
         legacy = _split_legacy(lines[0])
         if legacy:
-            # '복수' 같은 지시어는 마감 칸에 남기지 않는다. 폼의 토글로 옮긴다.
-            deadline_only = " ".join(_strip_multi_words(legacy["tail"]).split())
+            # '복수'·'익명' 같은 지시어는 마감 칸에 남기지 않는다. 폼의 토글로 옮긴다.
+            deadline_only = " ".join(_strip_words(legacy["tail"], MULTI_WORDS + ANON_WORDS).split())
             deadline, error = parse_deadline(deadline_only)
             return Request(
                 title=legacy["title"], options=legacy["options"],
-                multi_select=_has_multi_word(legacy["tail"]),
+                multi_select=_has_word(legacy["tail"], MULTI_WORDS),
+                anonymous=_has_word(legacy["tail"], ANON_WORDS),
                 closes_at=None if error else deadline,
                 deadline_text="" if error else deadline_only,
                 needs_form=True,
@@ -262,6 +268,7 @@ def parse_request(text: str) -> Request:
     options: list[str] = []
     deadline_text = ""
     multi = False
+    anonymous = False
     for line in rest:
         matched = DEADLINE_LINE.match(line)
         if matched:
@@ -269,6 +276,9 @@ def parse_request(text: str) -> Request:
             continue
         if MULTI_LINE.match(line):
             multi = True
+            continue
+        if ANON_LINE.match(line):
+            anonymous = True
             continue
         options.append(line)
 
@@ -280,17 +290,17 @@ def parse_request(text: str) -> Request:
     if error:
         return Request(error=error)
 
-    return Request(title=title, options=options, multi_select=multi,
+    return Request(title=title, options=options, multi_select=multi, anonymous=anonymous,
                    closes_at=closes_at, deadline_text=deadline_text)
 
 
-def _has_multi_word(text: str) -> bool:
-    return any(w in (text or "") for w in MULTI_WORDS)
+def _has_word(text: str, words: tuple[str, ...]) -> bool:
+    return any(w in (text or "") for w in words)
 
 
-def _strip_multi_words(text: str) -> str:
+def _strip_words(text: str, words: tuple[str, ...]) -> str:
     out = text or ""
-    for w in MULTI_WORDS:
+    for w in words:
         out = out.replace(w, " ")
     return out
 

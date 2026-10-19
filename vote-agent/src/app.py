@@ -63,9 +63,11 @@ USAGE = (
     "초밥집\n"
     "마감: 금요일 18시\n"
     "복수\n"
+    "익명\n"
     "```\n\n"
     "- **첫 줄** = 제목, **이후 각 줄** = 항목 하나\n"
-    "- `마감: …` 과 `복수` 는 지시어입니다 (생략 가능)\n"
+    "- `마감: …`, `복수`, `익명` 은 지시어입니다 (생략 가능)\n"
+    "- `익명` 을 쓰면 투표판에 투표한 사람 이름이 나오지 않습니다\n"
     "- 제목만 쓰면 입력 폼이 열립니다 — `@투표만들기` 만 보내도 됩니다\n\n"
     "마감 표현: `금요일 18시`, `내일 오후 3시`, `8월 22일 18시`, `3시간`"
 )
@@ -189,14 +191,16 @@ async def handle_message(ctx: ActivityContext[MessageActivity]) -> None:
             values={"title": request.title,
                     "options": "\n".join(request.options),
                     "deadline": request.deadline_text,
-                    "multi": request.multi_select})))
+                    "multi": request.multi_select,
+                    "anonymous": request.anonymous})))
         return
 
     poll = store.create_poll(
         conversation_id=activity.conversation.id, service_url=activity.service_url,
         creator_id=creator_id, creator_name=creator_name,
         title=request.title, options=request.options,
-        multi_select=request.multi_select, closes_at=request.closes_at)
+        multi_select=request.multi_select, closes_at=request.closes_at,
+        anonymous=request.anonymous)
 
     sent = await ctx.send(MessageActivityInput().add_card(cards.poll_card(poll)))
     store.set_activity_id(poll.id, sent.id)
@@ -218,6 +222,7 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     options = parsing.parse_options_block(str(data.get("options") or ""))
     deadline_text = str(data.get("deadline") or "").strip()
     multi = str(data.get("multi") or "").lower() == "true"
+    anonymous = str(data.get("anonymous") or "").lower() == "true"
 
     if not title:
         problem = "제목을 적어주세요."
@@ -237,13 +242,15 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
             MessageActivityInput().add_card(cards.form_card(
                 creator_name, error=problem,
                 values={"title": title, "options": data.get("options"),
-                        "deadline": deadline_text, "multi": multi})))
+                        "deadline": deadline_text, "multi": multi,
+                        "anonymous": anonymous})))
         return _ack(problem)
 
     poll = store.create_poll(
         conversation_id=activity.conversation.id, service_url=activity.service_url,
         creator_id=creator_id, creator_name=creator_name,
-        title=title, options=options, multi_select=multi, closes_at=closes_at)
+        title=title, options=options, multi_select=multi, closes_at=closes_at,
+        anonymous=anonymous)
     # 폼 카드가 붙어 있던 그 메시지를 투표판으로 바꾼다. 새 메시지를 만들지 않는다.
     store.set_activity_id(poll.id, activity.reply_to_id)
     poll = store.get_poll(poll.id) or poll

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS polls (
     creator_name    TEXT NOT NULL,
     title           TEXT NOT NULL,
     multi_select    INTEGER NOT NULL DEFAULT 0,
+    anonymous       INTEGER NOT NULL DEFAULT 0,
     closes_at       TEXT,
     closed_at       TEXT,
     created_at      TEXT NOT NULL
@@ -99,6 +100,8 @@ class Poll:
     closes_at: datetime | None
     closed_at: datetime | None
     created_at: datetime
+    # 익명이면 카드에 투표자 이름을 보여주지 않는다. 중복 투표를 막으려고 DB 에는 그대로 남긴다.
+    anonymous: bool = False
     options: list[Option] = field(default_factory=list)
 
     @property
@@ -132,7 +135,16 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """예전 DB 에 없는 칸을 추가한다. `CREATE TABLE IF NOT EXISTS` 는 칸을 늘려 주지 않는다."""
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(polls)")}
+        if "anonymous" not in columns:
+            # 2026-10-19 추가. 기존 투표는 실명(0)으로 남는다.
+            self._conn.execute(
+                "ALTER TABLE polls ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -141,16 +153,16 @@ class Store:
     def create_poll(self, *, conversation_id: str, service_url: str | None,
                     creator_id: str, creator_name: str, title: str,
                     options: list[str], multi_select: bool,
-                    closes_at: datetime | None) -> Poll:
+                    closes_at: datetime | None, anonymous: bool = False) -> Poll:
         poll_id = secrets.token_hex(6)
         created = now()
         with self._conn:
             self._conn.execute(
                 "INSERT INTO polls (id, conversation_id, activity_id, service_url,"
-                " creator_id, creator_name, title, multi_select, closes_at, closed_at, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " creator_id, creator_name, title, multi_select, anonymous, closes_at, closed_at,"
+                " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (poll_id, conversation_id, None, service_url, creator_id, creator_name,
-                 title, int(multi_select), _iso(closes_at), None, _iso(created)))
+                 title, int(multi_select), int(anonymous), _iso(closes_at), None, _iso(created)))
             self._conn.executemany(
                 "INSERT INTO poll_options (poll_id, idx, label) VALUES (?,?,?)",
                 [(poll_id, i, label) for i, label in enumerate(options)])
@@ -171,6 +183,7 @@ class Store:
             activity_id=row["activity_id"], service_url=row["service_url"],
             creator_id=row["creator_id"], creator_name=row["creator_name"],
             title=row["title"], multi_select=bool(row["multi_select"]),
+            anonymous=bool(row["anonymous"]),
             closes_at=_parse(row["closes_at"]), closed_at=_parse(row["closed_at"]),
             created_at=_parse(row["created_at"]),  # type: ignore[arg-type]
         )

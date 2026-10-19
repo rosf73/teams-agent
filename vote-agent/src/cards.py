@@ -97,6 +97,8 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
         status = "진행 중 · 마감 없음"
     if poll.multi_select:
         status += " · 복수 선택 가능"
+    if poll.anonymous:
+        status += " · 익명 투표"
 
     body: list = [
         C.TextBlock(text=f"📊 **{poll.title}**", size="Large", weight="Bolder", wrap=True),
@@ -111,8 +113,10 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
                  f"**{option.count}표** · {_percent(option.count, participants)}%",
             wrap=True, spacing="Medium",
             color="Good" if option.idx in leaders else None))
-        body.append(C.TextBlock(text=_voter_line(option.voters),
-                                size="Small", is_subtle=True, wrap=True, spacing="None"))
+        # 익명이면 이름 줄을 통째로 뺀다. 마감판도 같다 — 마감 후에도 누가 골랐는지는 공개하지 않는다.
+        if not poll.anonymous:
+            body.append(C.TextBlock(text=_voter_line(option.voters),
+                                    size="Small", is_subtle=True, wrap=True, spacing="None"))
 
     footer = (f"총 **{poll.total_votes}표** · **{poll.voter_count}명** 참여 · "
               f"만든 사람 {short_name(poll.creator_name)}")
@@ -171,6 +175,8 @@ def form_card(creator_name: str, error: str | None = None,
                     value=values.get("deadline")),
         C.ToggleInput(id="multi", title="복수 선택 허용",
                       value="true" if values.get("multi") else "false"),
+        C.ToggleInput(id="anonymous", title="익명 투표 (투표한 사람 이름을 숨깁니다)",
+                      value="true" if values.get("anonymous") else "false"),
     ]
 
     return C.AdaptiveCard(body=body, actions=[

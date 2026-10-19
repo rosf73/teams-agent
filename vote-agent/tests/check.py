@@ -875,14 +875,151 @@ def test_compat() -> None:
         compat.SUPPORTED_INSTALL_ACTIONS = saved
 
 
+def test_anonymous_parsing_store_cards() -> None:
+    import sqlite3
+
+    from store import Store
+
+    section("익명 — 지시어")
+    for line in ["익명", "익명투표", "익명 투표", "무기명", "anonymous", "Anonymous"]:
+        r = P.parse_request(f"회식\n삼겹살\n치킨\n{line}")
+        check(f"{line!r} 줄은 익명 지시어", r.anonymous and r.options == ["삼겹살", "치킨"],
+              f"익명={r.anonymous} {r.options}")
+    r = P.parse_request("회식\n삼겹살\n치킨\n마감: 3시간\n복수\n익명")
+    check("복수·마감·익명을 함께 쓸 수 있다",
+          r.anonymous and r.multi_select and r.closes_at is not None, f"{r!r}")
+    r = P.parse_request("회식\n삼겹살\n치킨")
+    check("지시어가 없으면 실명", not r.anonymous)
+    r = P.parse_request("설문\n익명 게시판 만들기\n실명 게시판 만들기")
+    check("'익명'으로 시작하는 항목은 지시어가 아니다",
+          not r.anonymous and r.options == ["익명 게시판 만들기", "실명 게시판 만들기"],
+          f"익명={r.anonymous} {r.options}")
+    r = P.parse_request("회식장소 / 삼겹살, 치킨 / 금요일 18시 / 복수 익명")
+    check("옛 `/` 문법의 익명도 폼 토글로 옮긴다 (마감 칸에 남기지 않음)",
+          r.needs_form and r.anonymous and r.multi_select and r.deadline_text == "금요일 18시",
+          f"익명={r.anonymous} 마감={r.deadline_text!r}")
+
+    section("익명 — 저장소")
+    store = Store(":memory:")
+    anon = store.create_poll(
+        conversation_id=CONVERSATION, service_url=None,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="익명", options=["a", "b"], multi_select=False, closes_at=None, anonymous=True)
+    named = store.create_poll(
+        conversation_id=CONVERSATION, service_url=None,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="실명", options=["a", "b"], multi_select=False, closes_at=None)
+    check("익명 여부가 저장된다", store.get_poll(anon.id).anonymous is True)
+    check("기본값은 실명", store.get_poll(named.id).anonymous is False)
+    store.toggle_vote(store.get_poll(anon.id), 0, *PEOPLE["alice"])
+    store.toggle_vote(store.get_poll(anon.id), 0, *PEOPLE["alice"])
+    check("익명이어도 같은 사람의 재클릭은 취소된다 (중복 투표 방지)",
+          store.get_poll(anon.id).total_votes == 0)
+    store.close()
+
+    # 운영 중인 DB 에는 anonymous 칸이 없다. 열 때 추가해야 한다.
+    old_path = os.path.join(tempfile.mkdtemp(), "old.db")
+    old = sqlite3.connect(old_path)
+    old.executescript("""
+        CREATE TABLE polls (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, activity_id TEXT,
+            service_url TEXT, creator_id TEXT NOT NULL, creator_name TEXT NOT NULL,
+            title TEXT NOT NULL, multi_select INTEGER NOT NULL DEFAULT 0, closes_at TEXT,
+            closed_at TEXT, created_at TEXT NOT NULL);
+        INSERT INTO polls VALUES ('old1', 'c', NULL, NULL, 'u', 'n', '예전 투표', 0, NULL, NULL,
+            '2026-10-01T00:00:00+00:00');
+    """)
+    old.commit(); old.close()
+    migrated = Store(old_path)
+    check("예전 DB 를 열면 anonymous 칸이 추가되고 기존 투표는 실명",
+          migrated.get_poll("old1") is not None and migrated.get_poll("old1").anonymous is False)
+    migrated.close()
+    check("한 번 더 열어도 문제없다 (중복 추가하지 않음)", Store(old_path).get_poll("old1") is not None)
+
+    section("익명 — 카드")
+    store = Store(":memory:")
+    poll = store.create_poll(
+        conversation_id=CONVERSATION, service_url=None,
+        creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+        title="팀장 평가", options=["좋음", "보통", "나쁨"],
+        multi_select=True, closes_at=None, anonymous=True)
+    store.toggle_vote(poll, 0, *PEOPLE["alice"])
+    store.toggle_vote(store.get_poll(poll.id), 1, *PEOPLE["bob"])
+    poll = store.get_poll(poll.id)
+    text = card_text(cards.poll_card(poll))
+    check("익명 투표 표시", "익명 투표" in text, text.splitlines()[1] if len(text.splitlines()) > 1 else text)
+    check("투표자 이름을 보여주지 않는다", "더미1" not in text and "테스터3" not in text, text)
+    check("표 수·참여자 수는 보여준다", "**1표**" in text and "**2명** 참여" in text)
+    check("복수 선택 표시도 유지", "복수 선택 가능" in text)
+    check("만든 사람은 그대로 표시", "만든 사람 샘플2" in text)
+    store.close_poll(poll.id)
+    ctext = card_text(cards.poll_card(store.get_poll(poll.id)))
+    check("마감판에서도 이름을 숨긴다", "더미1" not in ctext and "테스터3" not in ctext, ctext)
+    check("마감판도 익명 표시", "익명 투표" in ctext)
+    store.close()
+
+    form = cards.form_card(PEOPLE["owner"][1])
+    ids = [getattr(i, "id", None) for i in (form.body or [])]
+    check("폼에 익명 체크박스가 복수 선택 바로 다음", "anonymous" in ids
+          and ids.index("anonymous") == ids.index("multi") + 1, str(ids))
+    toggles = {getattr(i, "id", None): i for i in (form.body or [])}
+    check("익명 체크박스 기본값은 꺼짐", toggles["anonymous"].value == "false")
+    prefilled = cards.form_card("x", values={"anonymous": True})
+    check("미리 채운 값이 켜짐으로 들어간다",
+          {getattr(i, "id", None): i for i in prefilled.body}["anonymous"].value == "true")
+
+
+async def test_anonymous_handler() -> None:
+    import app
+
+    section("익명 — 핸들러")
+    check("사용법에 익명 안내", "`익명`" in app.USAGE)
+    ctx = FakeContext(message("팀 분위기\n좋다\n보통\n익명"))
+    await app.handle_message(ctx)
+    board = ctx.cards()[0]
+    poll_id = action_data(board.actions[0]).get("p")
+    check("메시지의 `익명` 으로 익명 투표 생성", app.store.get_poll(poll_id).anonymous)
+    check("항목에 `익명` 이 섞이지 않는다",
+          [o.label for o in app.store.get_poll(poll_id).options] == ["좋다", "보통"])
+
+    vote_ctx = FakeContext(invoke_from_card(board, 0, who="alice"))
+    _, result = await route(app, vote_ctx)
+    voted = card_text(vote_ctx.cards()[0])
+    check("투표 후 카드에 이름이 없다", "더미1" not in voted and "**1표**" in voted, voted)
+    check("본인에게는 확인 응답", "'좋다' 에 투표했습니다" in str(result.value))
+
+    form_ctx = FakeContext(message(""))
+    await app.handle_message(form_ctx)
+    form_id = form_ctx.calls[0][1]
+    create = FakeContext(invoke("create", {
+        "action": "create", "title": "익명 설문", "options": "가\n나",
+        "deadline": "", "multi": "false", "anonymous": "true"}, reply_to=form_id))
+    matched, _ = await route(app, create)
+    created = create.cards()[0]
+    pid = action_data(created.actions[0]).get("p")
+    check("폼 체크박스로 익명 투표 생성", matched == 1 and app.store.get_poll(pid).anonymous)
+
+    bad = FakeContext(invoke("create", {
+        "action": "create", "title": "x", "options": "하나만", "deadline": "",
+        "multi": "false", "anonymous": "true"}, reply_to=form_id))
+    await route(app, bad)
+    kept = {getattr(i, "id", None): getattr(i, "value", None) for i in bad.cards()[0].body}
+    check("폼 오류 때 익명 체크가 유지된다", kept.get("anonymous") == "true", str(kept))
+
+    for pid_ in (poll_id, pid):
+        if pid_ in app._timers:
+            app._timers[pid_].cancel()
+
+
 async def main() -> int:
     print("vote-agent 검증\n")
     test_compat()
     test_parsing()
     test_store()
     test_cards()
+    test_anonymous_parsing_store_cards()
     await test_routing()
     await test_handler()
+    await test_anonymous_handler()
     await test_concurrency()
     await test_timer()
     print(f"\n{'=' * 62}\n통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
