@@ -11,7 +11,7 @@
 Recurrence (월~금 08:30 KST)
   → 오늘 요일로 팀 업무 규칙 선택 (DayRules)
   → 내 Outlook 받은편지함에서 전사/팀 alias 수신 메일 조회
-  → 직전 브리핑 이후 메일만 남김 (월요일은 72시간, 나머지는 24시간)
+  → 직전 브리핑 이후 메일만 남기고 경조사 메일 제외 (월요일은 72시간, 나머지는 24시간)
   → Adaptive Card 로 팀 채널에 게시 (Flow bot)
 ```
 
@@ -19,10 +19,10 @@ Recurrence (월~금 08:30 KST)
 
 ```
 10월 26일 월요일 브리핑
-📅 오늘 전사 이슈
-• [전사공지] 11월 정기 보안점검 안내  ·  security@...
 ✅ 팀 업무
 • TimeSheet 입력
+📅 전사 이슈 리마인드
+• [전사공지] 11월 정기 보안점검 안내  ·  security@...
 [TimeSheet 열기]
 ```
 
@@ -227,7 +227,7 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 `받는 사람 또는 참조` 는 받는 사람·참조 중 하나라도 일치하면 가져온다. alias 사이는 세미콜론 `;` 이고 공백을 넣지 않는다.
 받은편지함 규칙으로 alias 메일을 다른 폴더로 옮기고 있다면 `폴더` 를 그 폴더로 바꾼다.
 
-## 9. `FilterMail` — 직전 브리핑 이후 메일만
+## 9. `FilterMail` — 직전 브리핑 이후 메일만, 경조사 제외
 
 액션 추가 검색에 `필터` → **데이터 작업** 의 **배열 필터링(Filter array)** → 이름 `FilterMail`.
 
@@ -236,8 +236,26 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
   그 칸의 내용을 지우고 아래를 **[붙여넣기]** (맨 앞 `@` 까지 포함)
 
 ```
-@greater(ticks(item()?['receivedDateTime']), ticks(outputs('Since')))
+@and(greater(ticks(item()?['receivedDateTime']), ticks(outputs('Since'))), not(or(contains(coalesce(item()?['subject'], ''), '訃告'), contains(coalesce(item()?['subject'], ''), '[부고]'), contains(coalesce(item()?['subject'], ''), '[출산소식]'))))
 ```
+
+두 가지 조건을 동시에 본다.
+
+1. 받은 시각이 `Since` 이후
+2. 제목에 **경조사 말머리가 없음** — 임직원 개인 경조사 메일을 카드에서 뺀다
+
+| 구분 | 제외 말머리 |
+|---|---|
+| 부고 | `訃告` (괄호 없이 어디든) `[부고]` |
+| 경사 | `[출산소식]` |
+
+회사 경조사 메일은 이 말머리를 붙여 보낸다. 다른 경사 알림은 없다.
+
+- 말머리를 제목 어디에서든 찾으므로 `FW: [부고] …`, `RE: [출산소식] …` 같은 전달·회신 메일도 빠진다.
+  `[부고]` `[출산소식]` 은 대괄호까지 포함해 찾으므로 `부고` 라는 단어만 들어간 회사 공지는 빠지지 않는다.
+  `訃告` 는 한자라 회사 공지에 쓰일 일이 없어 괄호 없이 찾는다. `[訃告]`, `(訃告)`, `訃告 -` 모두 빠진다
+- **말머리 추가:** 식 맨 끝 `))))` 바로 앞에 `, contains(coalesce(item()?['subject'], ''), '[새말머리]')` 를 끼워 넣는다
+- **말머리 빼기:** 해당 `contains(...)` 하나와 그 앞의 `, ` 를 지운다
 
 ## 10. `SelectMail` — 메일을 카드 줄로 변환
 
@@ -285,10 +303,10 @@ if(empty(body('FilterMail')), json('[{"type":"TextBlock","text":"특이사항 �
   "version": "1.4",
   "body": [
     { "type": "TextBlock", "text": "@{outputs('Title')}", "weight": "Bolder", "size": "Medium", "wrap": true },
-    { "type": "TextBlock", "text": "📅 오늘 전사 이슈", "weight": "Bolder", "spacing": "Medium" },
-    { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('MailItems'), json('[]'))} },
     { "type": "TextBlock", "text": "✅ 팀 업무", "weight": "Bolder", "spacing": "Medium" },
-    { "type": "TextBlock", "text": "• @{outputs('Rule')?['task']}", "wrap": true, "spacing": "Small" }
+    { "type": "TextBlock", "text": "• @{outputs('Rule')?['task']}", "wrap": true, "spacing": "Small" },
+    { "type": "TextBlock", "text": "📅 전사 이슈 리마인드", "weight": "Bolder", "spacing": "Medium" },
+    { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('MailItems'), json('[]'))} }
   ],
   "actions": @{coalesce(outputs('Rule')?['actions'], json('[]'))}
 }
