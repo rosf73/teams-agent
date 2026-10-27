@@ -30,6 +30,17 @@ from microsoft_teams.api import Account, MentionEntity, MessageActivity, TeamsCh
 # 전원 모드로 볼 표시명. Teams 클라이언트 언어에 따라 달라진다.
 EVERYONE_NAMES = {"모든 사용자", "모두", "전원", "everyone", "all"}
 
+# 원본 텍스트에서 전원 표현을 찾는 보조 신호. **태그 형태(`@모두`, `<at>모든 사용자</at>`)일 때만**
+# 본다. 그냥 부분문자열로 찾으면 "다들 모두", 이름 "Allen" 의 `all` 까지 전원 모드가 된다.
+_EVERYONE_TAG = re.compile(
+    r"(?:@|<at>)\s*(" + "|".join(re.escape(n) for n in sorted(EVERYONE_NAMES, key=len, reverse=True))
+    + r")(?=$|[\s<,.!?])")
+
+# Bot Framework 의 봇 계정 id 는 `28:` 로, 사람은 `29:` 로 시작한다.
+# 봇은 로스터에 없어서 "로스터에 없는 멘션" 규칙에 걸린다 — 2026-10-27 `@투표만들기` 를 같이
+# 태그하자 전원 모드가 켜졌다. 봇은 전원 판정에서도 후보에서도 뺀다.
+BOT_ID_PREFIX = "28:"
+
 # 표시명의 괄호 부분: "더미1 (Foxtrot Dummy)" -> "더미1", "Foxtrot Dummy"
 _PAREN = re.compile(r"^(?P<head>[^(]+?)\s*\((?P<inner>.+)\)\s*$")
 
@@ -81,6 +92,10 @@ def to_account(member: Account | TeamsChannelAccount) -> Account:
         name=member.name,
         aad_object_id=getattr(member, "aad_object_id", None),
     )
+
+
+def is_bot(account: Account) -> bool:
+    return (account.id or "").startswith(BOT_ID_PREFIX)
 
 
 def mention_entities(activity: MessageActivity) -> list[MentionEntity]:
@@ -145,29 +160,31 @@ def collect(activity: MessageActivity, roster: list) -> Candidates:
     result = Candidates()
 
     # ── 전원 모드 판정 ─────────────────────────────────────────────
-    # 주 신호는 "멘션 id 가 로스터에 없음" 이다. 로케일에 의존하지 않는다.
-    # 단 **로스터가 있을 때만** 유효하다 — 비어 있으면 모든 멘션이 이 조건에
-    # 걸려서 실제 사용자 태그를 전원 모드로 오인한다.
-    # 그리고 봇을 먼저 제외해야 한다. 봇은 로스터에 포함되지 않는다.
+    # 주 신호는 "멘션 id 가 로스터에 없고, 그 이름이 전원 표현" 이다.
+    # - **로스터가 있을 때만** 유효하다. 비어 있으면 모든 멘션이 로스터에 없다.
+    # - 봇(우리 봇 포함)은 먼저 뺀다. 봇은 로스터에 포함되지 않는다.
+    # - 로스터에 없다는 것만으로는 부족하다. 다른 봇, 태그 그룹(@사업혁신팀) 처럼 로스터에
+    #   없는 멘션이 더 있다. 이름까지 맞아야 전원으로 본다. 틀리면 판이 넓어지지 않고
+    #   좁아지는 쪽(그 멘션을 무시하고 안내)이라 더 안전하다.
+    mentions = mention_entities(activity)
     if roster:
-        for e in mention_entities(activity):
+        for e in mentions:
             acct = e.mentioned
-            if acct.id == bot_id:
+            if acct.id == bot_id or is_bot(acct) or acct.id in roster_by_id:
                 continue
-            if acct.id not in roster_by_id:
+            if _norm(acct.name) in EVERYONE_NAMES:
                 result.everyone = True
-                result.everyone_signal = f"멘션 `{acct.name}` 의 id 가 로스터에 없음"
+                result.everyone_signal = f"로스터에 없는 멘션 `{acct.name}` (전원 표현)"
                 break
 
     if not result.everyone:
-        raw = _norm(activity.text or "")
-        hit = next((t for t in EVERYONE_NAMES if t in raw), None)
+        hit = _EVERYONE_TAG.search(_norm(activity.text or ""))
         if hit:
             result.everyone = True
-            result.everyone_signal = f"원본 텍스트에서 `{hit}` 발견"
+            result.everyone_signal = f"원본 텍스트에서 태그 `{hit.group(0).strip()}` 발견"
 
     if result.everyone:
-        result.members = [m for m in roster if m.id != bot_id]
+        result.members = [m for m in roster if m.id != bot_id and not is_bot(m)]
         if not result.members:
             # 로스터를 못 가져왔으면 전원으로 확장할 방법이 없다.
             # 조용히 0명으로 두면 "후보를 못 찾았습니다" 만 나와 원인을 알 수 없다.
@@ -182,12 +199,18 @@ def collect(activity: MessageActivity, roster: list) -> Candidates:
     # Teams 가 공백으로 쪼갠 조각들이 같은 id 로 여러 번 오므로 id 로 합친다.
     # 표시명은 엔터티(`더미1`)가 아니라 로스터(`더미1 (Foxtrot Dummy)`)에서 가져온다.
     seen: set[str] = set()
-    for e in mention_entities(activity):
+    for e in mentions:
         acct = e.mentioned
         if acct.id == bot_id or acct.id in seen:
             continue
         seen.add(acct.id)
-        result.members.append(roster_by_id.get(acct.id, acct))
+        if is_bot(acct):
+            result.notes.append(f"`{acct.name}` 은(는) 봇이라 후보에서 뺐습니다")
+        elif roster and acct.id not in roster_by_id:
+            # 태그 그룹 등. 로스터를 못 가져왔을 때는 명시적 태그를 그대로 믿는다.
+            result.notes.append(f"`{acct.name}` 은(는) 채팅방 참여자가 아니라서 뺐습니다")
+        else:
+            result.members.append(roster_by_id.get(acct.id, acct))
 
     # ── 평문 @이름 (본인 포함용) ────────────────────────────────────
     leftover = (activity.strip_mentions_text().text or "").strip()
@@ -208,3 +231,8 @@ def parse_winner_count(text: str, default: int = 1) -> int:
     """텍스트 끝의 `N명` / `N` 을 당첨자 수로 읽는다. 없으면 default."""
     matches = re.findall(r"(\d+)\s*명?", text or "")
     return int(matches[-1]) if matches else default
+
+
+def wants_joker(text: str) -> bool:
+    """🃏 1등이대신당첨 을 넣을지. 기본으로 넣고 `조커없이` 가 있으면 뺀다."""
+    return not re.search(r"조커\s*없이", text or "")
