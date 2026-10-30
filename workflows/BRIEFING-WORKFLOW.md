@@ -10,6 +10,7 @@
 ```
 Recurrence (월~금 08:30 KST)
   → 오늘 요일로 팀 업무 규칙 선택 (DayRules)
+  → 월간 알림 판단 (말일 D-1·D-Day 출출박스, 둘째 주 수요일 보안점검)
   → 내 Outlook 받은편지함에서 전사/팀 alias 수신 메일 조회
   → 직전 브리핑 이후 메일만 남기고 경조사 메일 제외 (월요일은 72시간, 나머지는 24시간)
   → Adaptive Card 로 팀 채널에 게시 (Flow bot)
@@ -26,7 +27,7 @@ Recurrence (월~금 08:30 KST)
 [TimeSheet 열기]
 ```
 
-메일이 없으면 `특이사항 없음` 을 흐리게 표시한다.
+메일이 없으면 `특이사항 없음` 을 흐리게 표시한다. 월간 알림은 7-1절.
 
 ### 요일별 팀 업무
 
@@ -156,7 +157,7 @@ convertFromUtc(utcNow(), 'Korea Standard Time')
 ```
 
 - `task` 는 자유롭게 고쳐도 된다. 길면 카드에서 자동 줄바꿈된다.
-- **`task` 안에 큰따옴표 `"` 와 역슬래시 `\` 를 쓰지 않는다.** 12단계 카드 JSON 에 글자 그대로 끼워 넣어서 카드가 깨진다. 인용이 필요하면 `'` 나 `「」` 를 쓴다.
+- `task` 에 마크다운 `**굵게**` 를 써도 된다. 큰따옴표 `"` 도 괜찮다 (7-1 ⑤ 가 JSON 으로 안전하게 감싼다).
 - 버튼이 필요 없는 요일은 `"actions": []` 로 둔다. **`actions` 키 자체를 지우면 안 된다** (카드 JSON 이 깨진다).
 - 나중에 버튼을 붙이려면 1·2번처럼 `{ "type": "Action.OpenUrl", "title": "버튼 글자", "url": "주소" }` 를 넣는다.
 
@@ -184,6 +185,60 @@ concat(formatDateTime(outputs('Now'), 'M월 d일 '), outputs('Rule')?['day'], ' 
 ```
 addHours(utcNow(), if(equals(dayOfWeek(outputs('Now')), 1), -72, -24))
 ```
+
+---
+
+## 7-1. 월간 알림 — 출출박스, 보안점검
+
+| 언제 | 카드 위치 | 문구 |
+|---|---|---|
+| 말일 D-1 (영업일 기준) | 📅 전사 이슈 리마인드 맨 아래 | **출출박스 리셋까지 이틀 남음** |
+| 말일 D-Day (영업일 기준) | 📅 전사 이슈 리마인드 맨 아래 | **출출박스 리셋까지 단 하루 남음. 소진 필수!** |
+| 둘째 주 수요일 (8~14일의 수요일) | ✅ 팀 업무 맨 아래 | **보안점검 체크리스트** 상신 |
+
+**영업일 기준**: 흐름은 평일에만 돈다. 말일이 토·일이면 그 앞 금요일을 D-Day 로 본다.
+D-1 은 D-Day 의 바로 전 평일이다 (D-Day 가 월요일이면 그 전 금요일).
+
+| 달 | 말일 | D-1 | D-Day |
+|---|---|---|---|
+| 2026-10 | 10/31 (토) | 10/29 (목) | 10/30 (금) |
+| 2026-11 | 11/30 (월) | 11/27 (금) | 11/30 (월) |
+| 2026-12 | 12/31 (목) | 12/30 (수) | 12/31 (목) |
+
+`Since` 아래에 **작성** 액션 다섯 개를 차례로 추가한다. 모두 입력에 **[식]**.
+
+**① `MonthEnd`** — 이번 달 말일
+
+```
+addDays(startOfMonth(addToTime(outputs('Now'), 1, 'Month')), -1, 'yyyy-MM-dd')
+```
+
+**② `LastBizDay`** — 말일 D-Day (말일이 토요일이면 -1일, 일요일이면 -2일)
+
+```
+addDays(outputs('MonthEnd'), if(equals(dayOfWeek(outputs('MonthEnd')), 6), -1, if(equals(dayOfWeek(outputs('MonthEnd')), 0), -2, 0)), 'yyyy-MM-dd')
+```
+
+**③ `PrevBizDay`** — 말일 D-1 (D-Day 가 월요일이면 -3일)
+
+```
+addDays(outputs('LastBizDay'), if(equals(dayOfWeek(outputs('LastBizDay')), 1), -3, -1), 'yyyy-MM-dd')
+```
+
+**④ `NoticeItems`** — 전사 이슈 맨 아래에 붙일 출출박스 줄 (해당 없으면 빈 배열)
+
+```
+union(if(equals(formatDateTime(outputs('Now'), 'yyyy-MM-dd'), outputs('PrevBizDay')), json('[{"type":"TextBlock","text":"• **출출박스 리셋까지 이틀 남음**","wrap":true,"spacing":"None"}]'), json('[]')), if(equals(formatDateTime(outputs('Now'), 'yyyy-MM-dd'), outputs('LastBizDay')), json('[{"type":"TextBlock","text":"• **출출박스 리셋까지 단 하루 남음. 소진 필수!**","wrap":true,"spacing":"None"}]'), json('[]')))
+```
+
+**⑤ `TeamItems`** — 팀 업무 줄 전체 (요일별 업무 + 둘째 주 수요일이면 보안점검)
+
+```
+union(createArray(addProperty(json('{"type":"TextBlock","wrap":true,"spacing":"None"}'), 'text', concat('• ', outputs('Rule')?['task']))), if(and(equals(dayOfWeek(outputs('Now')), 3), greaterOrEquals(dayOfMonth(outputs('Now')), 8), lessOrEquals(dayOfMonth(outputs('Now')), 14)), json('[{"type":"TextBlock","text":"• **보안점검 체크리스트** 상신","wrap":true,"spacing":"None"}]'), json('[]')))
+```
+
+- 문구를 바꾸려면 ④·⑤ 식 안의 `"text":"• ..."` 부분만 고친다. 큰따옴표 `"` 와 작은따옴표 `'` 는 쓰지 않는다
+- 월간 알림을 더 넣으려면 ④ 또는 ⑤ 의 `union(` 안에 `if(조건, json('[{...}]'), json('[]'))` 를 하나 더 넣는다
 
 ---
 
@@ -274,13 +329,15 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 }
 ```
 
-## 11. `MailItems` — 메일이 없을 때 대체 문구
+## 11. `MailItems` — 메일 + 출출박스 줄, 둘 다 없을 때 대체 문구
 
 **작성** 액션 추가 → 이름 `MailItems` → 입력에 **[식]**:
 
 ```
-if(empty(body('FilterMail')), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), body('SelectMail'))
+if(and(empty(body('FilterMail')), empty(outputs('NoticeItems'))), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), union(body('SelectMail'), outputs('NoticeItems')))
 ```
+
+메일 줄 아래에 7-1 ④ 의 출출박스 줄을 붙인다. 메일도 출출박스 줄도 없을 때만 `특이사항 없음` 을 표시한다.
 
 ---
 
@@ -304,7 +361,7 @@ if(empty(body('FilterMail')), json('[{"type":"TextBlock","text":"특이사항 �
   "body": [
     { "type": "TextBlock", "text": "@{outputs('Title')}", "weight": "Bolder", "size": "Medium", "wrap": true },
     { "type": "TextBlock", "text": "✅ 팀 업무", "weight": "Bolder", "spacing": "Medium" },
-    { "type": "TextBlock", "text": "• @{outputs('Rule')?['task']}", "wrap": true, "spacing": "Small" },
+    { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('TeamItems'), json('[]'))} },
     { "type": "TextBlock", "text": "📅 전사 이슈 리마인드", "weight": "Bolder", "spacing": "Medium" },
     { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('MailItems'), json('[]'))} }
   ],
@@ -312,7 +369,7 @@ if(empty(body('FilterMail')), json('[{"type":"TextBlock","text":"특이사항 �
 }
 ```
 
-`"items"` 와 `"actions"` 뒤의 `@{coalesce(...)}` 는 따옴표 없이 넣는다. 배열이 JSON 으로 그대로 들어간다.
+`"items"` 와 `"actions"` 뒤의 `@{coalesce(...)}` 는 따옴표 없이 넣는다 (세 군데). 배열이 JSON 으로 그대로 들어간다.
 `coalesce(..., json('[]'))` 는 값이 비어 있으면 빈 배열 `[]` 을 대신 넣는다. 이게 없으면 `"actions": ,` 처럼 값이 빠진 JSON 이 되어
 `InvalidBotRequestMessageBody` 오류가 난다 (13절).
 붙여 넣은 `@{...}` 는 저장 후 토큰 모양으로 보일 수 있다. 정상이다.
@@ -324,6 +381,7 @@ Recurrence
   → Now → Holidays → 조건 ─ True: 종료
                          └ False: (비움)
   → DayRules → Rule → Title → Since
+  → MonthEnd → LastBizDay → PrevBizDay → NoticeItems → TeamItems
   → GetMail → FilterMail → SelectMail → MailItems
   → 채널에 카드 게시
 ```
@@ -335,8 +393,17 @@ Recurrence
 1. 12단계 게시 위치를 `Chat with Flow bot`, 받는 사람을 본인으로 둔다
 2. 5단계 `Rule` 식에서 `string(dayOfWeek(outputs('Now')))` 를 `'1'` 로 바꾸고 **테스트 → 수동** 으로 실행한다.
    `'2'` ~ `'5'` 까지 바꿔 가며 다섯 장을 모두 확인한다
-3. 확인이 끝나면 `Rule` 식을 원래대로 되돌리고, 게시 위치를 팀 채널로 바꾼다
-4. **기존 월요일 TimeSheet / 금요일 주간보고 알림 흐름을 끈다** (삭제 말고 끄기. 문제가 생기면 다시 켠다)
+3. **월간 알림 확인:** 2단계 `Now` 식을 날짜 문자열로 잠시 바꾼다 (fx 로 `'2026-11-27T08:30:00'` 처럼 따옴표 포함).
+   요일·월간 계산이 모두 그 날짜 기준으로 돈다. 메일 조회(`Since`)는 영향을 받지 않는다
+
+   | `Now` 에 넣을 날짜 | 기대 결과 |
+   |---|---|
+   | `'2026-11-11T08:30:00'` (수) | 팀 업무에 보안점검 줄 |
+   | `'2026-11-27T08:30:00'` (금) | 전사 이슈 맨 아래 "이틀 남음" |
+   | `'2026-11-30T08:30:00'` (월) | 전사 이슈 맨 아래 "단 하루 남음" |
+
+4. 확인이 끝나면 `Rule`·`Now` 식을 원래대로 되돌리고, 게시 위치를 팀 채널로 바꾼다
+5. **기존 월요일 TimeSheet / 금요일 주간보고 알림 흐름을 끈다** (삭제 말고 끄기. 문제가 생기면 다시 켠다)
 
 ### 카드 게시에서 `InvalidBotRequestMessageBody` (유효하지 않은 JSON) 가 나면
 
@@ -349,10 +416,9 @@ Recurrence
    | 본문에서 보이는 것 | 원인 | 고치기 |
    |---|---|---|
    | `"actions": }` 또는 `"items": }` | 값이 비어 있다. `DayRules` 에서 그 요일의 `actions` 키가 빠졌거나, 이전 버전(`button`/`url`)의 `DayRules` 를 쓰고 있다 | 4단계 `DayRules` 를 최신 내용으로 다시 붙여 넣고, 12단계 카드를 `coalesce` 버전으로 바꾼다 |
-   | `"text": "• ...따옴표"..."` | `task` 문구에 큰따옴표 `"` 가 있다 | `DayRules` 의 `task` 에서 `"` 를 `'` 나 `「」` 로 바꾼다 |
    | `"items": "[{...}]"` (배열이 따옴표로 감싸짐) | 카드 JSON 에서 `@{...}` 를 따옴표 안에 넣었다 | `"items"` / `"actions"` 뒤의 따옴표를 지운다 |
 
-4. 같은 패널에서 앞 단계 `Rule` 과 `MailItems` 의 **출력** 도 확인한다. `Rule` 출력에 `actions` 가 있어야 한다
+4. 같은 패널에서 앞 단계 `Rule`, `TeamItems`, `MailItems` 의 **출력** 도 확인한다. `Rule` 출력에 `actions` 가 있어야 하고, `TeamItems`·`MailItems` 는 `[` 로 시작하는 배열이어야 한다
 
 ---
 
@@ -369,4 +435,5 @@ Recurrence
   - 공휴일 다음 날은 조회 구간이 24시간이라, 휴일 전날 08:30 ~ 휴일 08:30 사이 메일이 빠진다.
   - 금요일이 공휴일이면 목요일 문구("금요일 휴가자는…")가 맞지 않고 금요일 주간보고 알림도 나가지 않는다.
   - alias 가 BCC 로만 들어온 메일은 `To Or CC` 에 걸리지 않는다.
+  - 월간 알림 날짜가 `Holidays` 에 든 휴일이면 그날은 흐름이 종료되어 알림이 나가지 않는다. 날짜를 앞당기지 않는다
   - `To Or CC` 필터는 폴더의 최근 메일 250통 안에서만 적용된다 (커넥터 문서). 3일 사이 받은편지함에 250통 넘게 쌓이면 오래된 alias 메일이 빠질 수 있다.
