@@ -12,7 +12,8 @@ Recurrence (월~금 08:30 KST)
   → 오늘 요일로 팀 업무 규칙 선택 (DayRules)
   → 월간 알림 판단 (말일 D-1·D-Day 출출박스, 둘째 주 수요일 보안점검)
   → 내 Outlook 받은편지함에서 전사/팀 alias 수신 메일 조회
-  → 직전 브리핑 이후 메일만 남기고 경조사 메일 제외 (월요일은 72시간, 나머지는 24시간)
+  → 직전 브리핑 이후 메일만 남기고 경조사·결재완료 메일 제외 (월요일은 72시간, 나머지는 24시간)
+  → 팀 alias 메일은 팀 업무 아래, 전사 alias 메일은 전사 이슈 리마인드 아래로 나눔
   → Adaptive Card 로 팀 채널에 게시 (Flow bot)
 ```
 
@@ -277,12 +278,12 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 | 받는 사람 또는 참조 | To Or CC | `전사alias@회사도메인;팀alias@회사도메인` |
 | 읽지 않은 메시지만 가져오기 | Fetch Only Unread Messages | `아니요` |
 | 첨부 파일 포함 | Include Attachments | `아니요` |
-| Top | Top | `25` |
+| Top | Top | `40` (두 alias 가 나눠 쓴다) |
 
 `받는 사람 또는 참조` 는 받는 사람·참조 중 하나라도 일치하면 가져온다. alias 사이는 세미콜론 `;` 이고 공백을 넣지 않는다.
 받은편지함 규칙으로 alias 메일을 다른 폴더로 옮기고 있다면 `폴더` 를 그 폴더로 바꾼다.
 
-## 9. `FilterMail` — 직전 브리핑 이후 메일만, 경조사 제외
+## 9. `FilterMail` — 직전 브리핑 이후 메일만, 경조사·결재완료 제외
 
 액션 추가 검색에 `필터` → **데이터 작업** 의 **배열 필터링(Filter array)** → 이름 `FilterMail`.
 
@@ -291,32 +292,59 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
   그 칸의 내용을 지우고 아래를 **[붙여넣기]** (맨 앞 `@` 까지 포함)
 
 ```
-@and(greater(ticks(item()?['receivedDateTime']), ticks(outputs('Since'))), not(or(contains(coalesce(item()?['subject'], ''), '訃告'), contains(coalesce(item()?['subject'], ''), '[부고]'), contains(coalesce(item()?['subject'], ''), '[출산소식]'))))
+@and(greater(ticks(item()?['receivedDateTime']), ticks(outputs('Since'))), not(or(contains(coalesce(item()?['subject'], ''), '訃告'), contains(coalesce(item()?['subject'], ''), '[부고]'), contains(coalesce(item()?['subject'], ''), '[출산소식]'), contains(coalesce(item()?['subject'], ''), '[결재완료]'))))
 ```
 
 두 가지 조건을 동시에 본다.
 
 1. 받은 시각이 `Since` 이후
-2. 제목에 **경조사 말머리가 없음** — 임직원 개인 경조사 메일을 카드에서 뺀다
+2. 제목에 **제외 말머리가 없음** — 임직원 개인 경조사 메일과 결재 완료 알림을 카드에서 뺀다
 
 | 구분 | 제외 말머리 |
 |---|---|
 | 부고 | `訃告` (괄호 없이 어디든) `[부고]` |
 | 경사 | `[출산소식]` |
+| 결재 | `[결재완료]` |
 
-회사 경조사 메일은 이 말머리를 붙여 보낸다. 다른 경사 알림은 없다.
+회사 경조사 메일은 이 말머리를 붙여 보낸다. 다른 경사 알림은 없다. 결재 완료 알림은 `[결재완료]` 말머리로 온다.
 
-- 말머리를 제목 어디에서든 찾으므로 `FW: [부고] …`, `RE: [출산소식] …` 같은 전달·회신 메일도 빠진다.
-  `[부고]` `[출산소식]` 은 대괄호까지 포함해 찾으므로 `부고` 라는 단어만 들어간 회사 공지는 빠지지 않는다.
+- 말머리를 제목 어디에서든 찾으므로 `FW: [부고] …`, `RE: [결재완료] …` 같은 전달·회신 메일도 빠진다.
+  `[부고]` `[출산소식]` `[결재완료]` 는 대괄호까지 포함해 찾으므로 `부고` 라는 단어만 들어간 회사 공지는 빠지지 않는다.
   `訃告` 는 한자라 회사 공지에 쓰일 일이 없어 괄호 없이 찾는다. `[訃告]`, `(訃告)`, `訃告 -` 모두 빠진다
 - **말머리 추가:** 식 맨 끝 `))))` 바로 앞에 `, contains(coalesce(item()?['subject'], ''), '[새말머리]')` 를 끼워 넣는다
 - **말머리 빼기:** 해당 `contains(...)` 하나와 그 앞의 `, ` 를 지운다
 
-## 10. `SelectMail` — 메일을 카드 줄로 변환
+## 9-1. 팀 alias 메일과 전사 메일 나누기
+
+받는 사람·참조에 **팀 alias** 가 있으면 ✅ 팀 업무 아래로, 나머지(전사 alias 메일)는 📅 전사 이슈 리마인드 아래로 보낸다.
+두 alias 에 동시에 온 메일은 **팀 업무 쪽 한 곳에만** 나온다.
+
+**① `TeamAlias`** — `FilterMail` 아래에 **작성** 액션 추가 → 입력에 팀 alias 주소를 **[붙여넣기]** (따옴표 없이)
+
+```
+팀alias@회사도메인
+```
+
+**② `TeamMail`** — **배열 필터링** 추가 → **From** 에 **[식]** `body('FilterMail')` → 고급 모드에 **[붙여넣기]**
+
+```
+@contains(concat(';', replace(toLower(concat(coalesce(item()?['toRecipients'], ''), ';', coalesce(item()?['ccRecipients'], ''))), ' ', ''), ';'), concat(';', toLower(trim(outputs('TeamAlias'))), ';'))
+```
+
+**③ `CompanyMail`** — **배열 필터링** 하나 더 → **From** 에 **[식]** `body('FilterMail')` → 고급 모드에 **[붙여넣기]**
+
+```
+@not(contains(concat(';', replace(toLower(concat(coalesce(item()?['toRecipients'], ''), ';', coalesce(item()?['ccRecipients'], ''))), ' ', ''), ';'), concat(';', toLower(trim(outputs('TeamAlias'))), ';')))
+```
+
+②와 ③은 같은 식에 `not` 만 다르다. 받는 사람·참조 주소를 `;` 로 감싸 통째로 비교하므로
+`myteam@…` 같은 비슷한 주소가 `team@…` 으로 잘못 걸리지 않는다. 대소문자와 공백도 무시한다.
+
+## 10. `SelectMail` / `SelectTeamMail` — 메일을 카드 줄로 변환
 
 액션 추가 검색에 `선택` → **데이터 작업** 의 **선택(Select)** → 이름 `SelectMail`.
 
-- **From** 칸 → **[식]** `body('FilterMail')`
+- **From** 칸 → **[식]** `body('CompanyMail')`
 - **Map** 칸 옆의 **텍스트 모드로 전환(Switch Map to text mode)** 아이콘을 누르면 키/값 두 칸이 텍스트 칸 하나로 바뀐다.
   그 칸에 아래를 **[붙여넣기]**
 
@@ -329,15 +357,27 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 }
 ```
 
+같은 방법으로 **선택** 액션을 하나 더 추가해 이름 `SelectTeamMail`, **From** 은 **[식]** `body('TeamMail')`, Map 은 위와 똑같이 붙여 넣는다.
+
 ## 11. `MailItems` — 메일 + 출출박스 줄, 둘 다 없을 때 대체 문구
 
 **작성** 액션 추가 → 이름 `MailItems` → 입력에 **[식]**:
 
 ```
-if(and(empty(body('FilterMail')), empty(outputs('NoticeItems'))), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), union(body('SelectMail'), outputs('NoticeItems')))
+if(and(empty(body('CompanyMail')), empty(outputs('NoticeItems'))), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), union(body('SelectMail'), outputs('NoticeItems')))
 ```
 
-메일 줄 아래에 7-1 ④ 의 출출박스 줄을 붙인다. 메일도 출출박스 줄도 없을 때만 `특이사항 없음` 을 표시한다.
+전사 메일 줄 아래에 7-1 ④ 의 출출박스 줄을 붙인다. 전사 메일도 출출박스 줄도 없을 때만 `특이사항 없음` 을 표시한다.
+
+## 11-1. `TeamAll` — 팀 업무 + 팀 alias 메일
+
+**작성** 액션 추가 → 이름 `TeamAll` → 입력에 **[식]**:
+
+```
+union(outputs('TeamItems'), body('SelectTeamMail'))
+```
+
+요일·월간 팀 업무 줄 아래에 팀 alias 메일 줄을 붙인다. 팀 메일이 없으면 업무 줄만 남는다.
 
 ---
 
@@ -361,7 +401,7 @@ if(and(empty(body('FilterMail')), empty(outputs('NoticeItems'))), json('[{"type"
   "body": [
     { "type": "TextBlock", "text": "@{outputs('Title')}", "weight": "Bolder", "size": "Medium", "wrap": true },
     { "type": "TextBlock", "text": "✅ 팀 업무", "weight": "Bolder", "spacing": "Medium" },
-    { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('TeamItems'), json('[]'))} },
+    { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('TeamAll'), json('[]'))} },
     { "type": "TextBlock", "text": "📅 전사 이슈 리마인드", "weight": "Bolder", "spacing": "Medium" },
     { "type": "Container", "spacing": "Small", "items": @{coalesce(outputs('MailItems'), json('[]'))} }
   ],
@@ -382,7 +422,8 @@ Recurrence
                          └ False: (비움)
   → DayRules → Rule → Title → Since
   → MonthEnd → LastBizDay → PrevBizDay → NoticeItems → TeamItems
-  → GetMail → FilterMail → SelectMail → MailItems
+  → GetMail → FilterMail → TeamAlias → TeamMail → CompanyMail
+  → SelectMail → SelectTeamMail → MailItems → TeamAll
   → 채널에 카드 게시
 ```
 
@@ -418,7 +459,7 @@ Recurrence
    | `"actions": }` 또는 `"items": }` | 값이 비어 있다. `DayRules` 에서 그 요일의 `actions` 키가 빠졌거나, 이전 버전(`button`/`url`)의 `DayRules` 를 쓰고 있다 | 4단계 `DayRules` 를 최신 내용으로 다시 붙여 넣고, 12단계 카드를 `coalesce` 버전으로 바꾼다 |
    | `"items": "[{...}]"` (배열이 따옴표로 감싸짐) | 카드 JSON 에서 `@{...}` 를 따옴표 안에 넣었다 | `"items"` / `"actions"` 뒤의 따옴표를 지운다 |
 
-4. 같은 패널에서 앞 단계 `Rule`, `TeamItems`, `MailItems` 의 **출력** 도 확인한다. `Rule` 출력에 `actions` 가 있어야 하고, `TeamItems`·`MailItems` 는 `[` 로 시작하는 배열이어야 한다
+4. 같은 패널에서 앞 단계 `Rule`, `TeamAll`, `MailItems` 의 **출력** 도 확인한다. `Rule` 출력에 `actions` 가 있어야 하고, `TeamAll`·`MailItems` 는 `[` 로 시작하는 배열이어야 한다
 
 ---
 
