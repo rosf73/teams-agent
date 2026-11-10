@@ -14,6 +14,7 @@ Recurrence (월~금 08:30 KST)
   → 내 Outlook 받은편지함에서 전사/팀 alias 수신 메일 조회
   → 직전 브리핑 이후 메일만 남기고 경조사·결재완료 메일 제외 (월요일은 72시간, 나머지는 24시간)
   → 팀 alias 메일은 팀 업무 아래, 전사 alias 메일은 전사 이슈 리마인드 아래로 나눔
+  → all@ 로 온 [공지] 메일(부고 관련 제외)도 전사 이슈 리마인드 아래에 추가
   → Adaptive Card 로 팀 채널에 게시 (Flow bot)
 ```
 
@@ -283,6 +284,23 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 `받는 사람 또는 참조` 는 받는 사람·참조 중 하나라도 일치하면 가져온다. alias 사이는 세미콜론 `;` 이고 공백을 넣지 않는다.
 받은편지함 규칙으로 alias 메일을 다른 폴더로 옮기고 있다면 `폴더` 를 그 폴더로 바꾼다.
 
+### 8-3. `GetAllMail` — all@ 로 온 [공지] 메일
+
+`all@altimedia.com` 은 전 직원이 받는 주소라 메일이 많다. `GetMail` 에 섞으면 Top 40 을 금방 다 써 버리므로
+**따로 조회한다.** `GetMail` 아래에 **메일 받기(V3)** 를 하나 더 추가 → 이름 `GetAllMail`.
+
+| 화면 이름 (한글 UI) | 영어 UI | 값 |
+|---|---|---|
+| 폴더 | Folder | `Inbox` (받은 편지함) |
+| 받는 사람 또는 참조 | To Or CC | `all@altimedia.com` |
+| 주체 필터 (화면에 따라 `제목 필터`) | Subject Filter | `[공지]` |
+| 읽지 않은 메시지만 가져오기 | Fetch Only Unread Messages | `아니요` |
+| 첨부 파일 포함 | Include Attachments | `아니요` |
+| Top | Top | `20` |
+
+`주체 필터` 는 서버에서 먼저 걸러 Top 을 아끼려는 것이다. 9-2단계에서 `[공지]` 를 한 번 더 확인하므로
+이 칸이 대괄호를 다르게 해석하더라도 결과는 틀리지 않는다.
+
 ## 9. `FilterMail` — 직전 브리핑 이후 메일만, 경조사·결재완료 제외
 
 액션 추가 검색에 `필터` → **데이터 작업** 의 **배열 필터링(Filter array)** → 이름 `FilterMail`.
@@ -311,7 +329,7 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 - 말머리를 제목 어디에서든 찾으므로 `FW: [부고] …`, `RE: [결재완료] …` 같은 전달·회신 메일도 빠진다.
   `[부고]` `[출산소식]` `[결재완료]` 는 대괄호까지 포함해 찾으므로 `부고` 라는 단어만 들어간 회사 공지는 빠지지 않는다.
   `訃告` 는 한자라 회사 공지에 쓰일 일이 없어 괄호 없이 찾는다. `[訃告]`, `(訃告)`, `訃告 -` 모두 빠진다
-- **말머리 추가:** 식 맨 끝 `))))` 바로 앞에 `, contains(coalesce(item()?['subject'], ''), '[새말머리]')` 를 끼워 넣는다
+- **말머리 추가:** 식 맨 끝 `)))` (괄호 세 개) 바로 앞에 `, contains(coalesce(item()?['subject'], ''), '[새말머리]')` 를 끼워 넣는다
 - **말머리 빼기:** 해당 `contains(...)` 하나와 그 앞의 `, ` 를 지운다
 
 ## 9-1. 팀 alias 메일과 전사 메일 나누기
@@ -340,11 +358,34 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 ②와 ③은 같은 식에 `not` 만 다르다. 받는 사람·참조 주소를 `;` 로 감싸 통째로 비교하므로
 `myteam@…` 같은 비슷한 주소가 `team@…` 으로 잘못 걸리지 않는다. 대소문자와 공백도 무시한다.
 
+## 9-2. `AllNotice` — all@ 공지 중 부고 관련 제외
+
+`CompanyMail` 아래에 **배열 필터링** 추가 → 이름 `AllNotice` → **From** 에 **[식]** `body('GetAllMail')?['value']` → 고급 모드에 **[붙여넣기]**
+
+```
+@and(greater(ticks(item()?['receivedDateTime']), ticks(outputs('Since'))), contains(coalesce(item()?['subject'], ''), '[공지]'), not(or(contains(coalesce(item()?['subject'], ''), '부고'), contains(coalesce(item()?['subject'], ''), '訃告'), contains(coalesce(item()?['subject'], ''), '별세'), contains(coalesce(item()?['subject'], ''), '소천'), contains(coalesce(item()?['subject'], ''), '빈소'), contains(coalesce(item()?['subject'], ''), '발인'), contains(coalesce(item()?['subject'], ''), '[출산소식]'), contains(coalesce(item()?['subject'], ''), '[결재완료]'))))
+```
+
+세 가지 조건을 동시에 본다.
+
+1. 받은 시각이 `Since` 이후
+2. 제목에 `[공지]` 가 있음
+3. 제목에 아래 단어가 하나도 없음
+
+| 구분 | 제외 단어 |
+|---|---|
+| 부고 관련 | `부고` `訃告` `별세` `소천` `빈소` `발인` |
+| 9단계와 같은 제외 | `[출산소식]` `[결재완료]` |
+
+all@ 공지는 `[공지] 부고 - …` 처럼 **대괄호 없이** 부고가 들어올 수 있어서, 9단계와 달리 `부고` 를 괄호 없이 찾는다.
+단어 추가·빼기 방법은 9단계와 같다 (식 맨 끝 `)))` (괄호 세 개) 바로 앞에 `, contains(coalesce(item()?['subject'], ''), '새단어')`).
+
 ## 10. `SelectMail` / `SelectTeamMail` — 메일을 카드 줄로 변환
 
 액션 추가 검색에 `선택` → **데이터 작업** 의 **선택(Select)** → 이름 `SelectMail`.
 
-- **From** 칸 → **[식]** `body('CompanyMail')`
+- **From** 칸 → **[식]** `union(body('CompanyMail'), body('AllNotice'))`
+  (전사 alias 메일 + all@ 공지. 두 주소로 동시에 온 같은 메일은 `union` 이 한 번만 남긴다)
 - **Map** 칸 옆의 **텍스트 모드로 전환(Switch Map to text mode)** 아이콘을 누르면 키/값 두 칸이 텍스트 칸 하나로 바뀐다.
   그 칸에 아래를 **[붙여넣기]**
 
@@ -364,10 +405,10 @@ V3 패널에서 **폴더** 칸은 바로 보인다. 나머지는 **고급 매개
 **작성** 액션 추가 → 이름 `MailItems` → 입력에 **[식]**:
 
 ```
-if(and(empty(body('CompanyMail')), empty(outputs('NoticeItems'))), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), union(body('SelectMail'), outputs('NoticeItems')))
+if(and(empty(body('SelectMail')), empty(outputs('NoticeItems'))), json('[{"type":"TextBlock","text":"특이사항 없음","isSubtle":true,"spacing":"None"}]'), union(body('SelectMail'), outputs('NoticeItems')))
 ```
 
-전사 메일 줄 아래에 7-1 ④ 의 출출박스 줄을 붙인다. 전사 메일도 출출박스 줄도 없을 때만 `특이사항 없음` 을 표시한다.
+전사 메일·all@ 공지 줄 아래에 7-1 ④ 의 출출박스 줄을 붙인다. 셋 다 없을 때만 `특이사항 없음` 을 표시한다.
 
 ## 11-1. `TeamAll` — 팀 업무 + 팀 alias 메일
 
@@ -422,7 +463,7 @@ Recurrence
                          └ False: (비움)
   → DayRules → Rule → Title → Since
   → MonthEnd → LastBizDay → PrevBizDay → NoticeItems → TeamItems
-  → GetMail → FilterMail → TeamAlias → TeamMail → CompanyMail
+  → GetMail → GetAllMail → FilterMail → TeamAlias → TeamMail → CompanyMail → AllNotice
   → SelectMail → SelectTeamMail → MailItems → TeamAll
   → 채널에 카드 게시
 ```
