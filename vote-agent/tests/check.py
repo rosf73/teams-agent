@@ -88,12 +88,18 @@ class FakeContext:
     def __init__(self, activity) -> None:
         self.activity = activity
         self.calls: list[tuple[str, str, object]] = []
+        self.delete_error: Exception | None = None
         outer = self
 
         class Activities:
             async def update(self, activity_id, msg):
                 outer.calls.append(("UPDATE", activity_id, msg))
                 FakeContext.updates.append(msg)
+
+            async def delete(self, activity_id):
+                outer.calls.append(("DELETE", activity_id, None))
+                if outer.delete_error:
+                    raise outer.delete_error
 
         self.api = type("Api", (), {"conversations": type("Conv", (), {
             "activities": staticmethod(lambda cid: Activities()),
@@ -485,7 +491,10 @@ def test_cards() -> None:
     ftext = card_text(form)
     ids = [getattr(i, "id", None) for i in (form.body or [])]
     check("폼에 4개 입력", {"title", "options", "deadline", "multi"} <= set(ids), str(ids))
-    check("폼 제출 verb=create", card_actions(form) == [("투표 시작", "create")])
+    check("폼 버튼: 투표 시작 + 취소",
+          card_actions(form) == [("투표 시작", "create"), ("취소", "cancel")], str(card_actions(form)))
+    cancel = form.actions[1]
+    check("취소는 입력 없이 눌린다 (필수 칸이 비어도)", cancel.associated_inputs == "none")
     check("폼에 만든 사람 안내", "샘플2 님이 만드는 중" in ftext)
     err = card_text(cards.form_card("x", error="항목을 2개 이상 적어주세요."))
     check("폼 오류 표시", "⚠️ 항목을 2개 이상" in err)
@@ -515,9 +524,12 @@ async def test_routing() -> None:
         check(f"{label} → 핸들러 1개 매칭", len(matched) == 1,
               f"{len(matched)}개 / data={act.value.action.data}")
 
-    form = cards.form_card(PEOPLE["owner"][1])
+    form = cards.form_card(PEOPLE["owner"][1], creator_id=PEOPLE["owner"][0])
     act = invoke_from_card(form, 0)
     check("폼 제출 → 핸들러 1개 매칭", len(app.app.router.select_handlers(act)) == 1,
+          f"data={act.value.action.data}")
+    act = invoke_from_card(form, 1)
+    check("폼 취소 → 핸들러 1개 매칭", len(app.app.router.select_handlers(act)) == 1,
           f"data={act.value.action.data}")
 
     check("모든 액션 data 에 'action' 키가 있다",
@@ -530,6 +542,53 @@ async def test_routing() -> None:
     section("라우팅 — 메시지")
     check("@멘션 메시지 → 핸들러 매칭",
           len(app.app.router.select_handlers(message("제목\n항목1\n항목2"))) >= 1)
+
+
+async def test_form_cancel() -> None:
+    import app
+
+    section("폼 — 취소 버튼과 부른 사람 확인")
+    ctx = FakeContext(message("회식 장소"))          # 제목만 → 폼
+    await route(app, ctx)
+    form_id, form_msg = next((i, m) for k, i, m in ctx.calls if k == "SEND")
+    form = form_msg.attachments[0].content
+    check("폼 버튼 data 에 부른 사람 id",
+          all(action_data(a).get("c") == PEOPLE["owner"][0] for a in form.actions),
+          str([action_data(a) for a in form.actions]))
+
+    other = FakeContext(invoke_from_card(form, 1, who="alice", reply_to=form_id))
+    _, result = await route(app, other)
+    check("다른 사람은 취소 못 함 (메시지 그대로)",
+          not any(k == "DELETE" for k, _, _ in other.calls) and "부른 사람만" in result.value,
+          result.value)
+
+    owner = FakeContext(invoke_from_card(form, 1, reply_to=form_id))
+    _, result = await route(app, owner)
+    check("부른 사람이 취소 → 그 메시지를 삭제",
+          [(k, i) for k, i, _ in owner.calls] == [("DELETE", form_id)], str(owner.calls))
+    check("취소 확인 응답", result.value == "취소했습니다.", result.value)
+
+    broken = FakeContext(invoke_from_card(form, 1, reply_to=form_id))
+    broken.delete_error = RuntimeError("403")
+    _, result = await route(app, broken)
+    replaced = [m for k, _, m in broken.calls if k == "UPDATE"]
+    check("삭제가 실패하면 '취소된 투표 만들기' 로 바꿔 둔다",
+          len(replaced) == 1 and "취소된 투표 만들기" in card_text(replaced[0].attachments[0].content)
+          and result.value == "취소했습니다.")
+
+    before = app.store.counts()["polls"]
+    filled = invoke("create", {**action_data(form.actions[0]), "title": "회식 장소",
+                               "options": "고기\n회"}, who="alice", reply_to=form_id)
+    sneak = FakeContext(filled)
+    _, result = await route(app, sneak)
+    check("다른 사람은 제출 못 함 (투표가 생기지 않는다)",
+          "부른 사람만" in result.value and not sneak.calls, result.value)
+    check("투표 수 그대로", app.store.counts()["polls"] == before)
+
+    legacy = invoke("cancel", {"action": "cancel"}, who="alice", reply_to="old-form")
+    old = FakeContext(legacy)
+    await route(app, old)
+    check("예전 폼(data 에 c 없음)은 막지 않는다", [k for k, _, _ in old.calls] == ["DELETE"])
 
 
 async def test_handler() -> None:
@@ -1275,6 +1334,7 @@ async def main() -> int:
     test_anonymous_parsing_store_cards()
     await test_routing()
     await test_handler()
+    await test_form_cancel()
     await test_anonymous_handler()
     await test_vote_resend()
     await test_vote_responds_before_repaint()

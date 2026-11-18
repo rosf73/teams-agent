@@ -271,7 +271,7 @@ async def handle_message(ctx: ActivityContext[MessageActivity]) -> None:
         # 항목이 없으면 파싱하지 않고 폼을 띄운다. 있는 값은 미리 채워 둔다.
         # 이 카드가 곧 투표판이 된다 (새 메시지를 만들지 않는다).
         await ctx.send(MessageActivityInput().add_card(cards.form_card(
-            creator_name, note=request.note,
+            creator_name, note=request.note, creator_id=creator_id,
             values={"title": request.title,
                     "options": "\n".join(request.options),
                     "deadline": request.deadline_text,
@@ -302,6 +302,11 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     creator_id = author.id if author else "unknown"
     creator_name = (author.name if author else None) or "알 수 없음"
 
+    # 부른 사람만 제출한다. 예전 폼(data 에 c 가 없음)은 막지 않는다.
+    owner = data.get("c")
+    if owner and creator_id != owner:
+        return _ack("투표를 부른 사람만 제출할 수 있습니다.")
+
     title = str(data.get("title") or "").strip()
     options = parsing.parse_options_block(str(data.get("options") or ""))
     deadline_text = str(data.get("deadline") or "").strip()
@@ -324,7 +329,7 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
         await ctx.api.conversations.activities(activity.conversation.id).update(
             activity.reply_to_id,
             MessageActivityInput().add_card(cards.form_card(
-                creator_name, error=problem,
+                creator_name, error=problem, creator_id=creator_id,
                 values={"title": title, "options": data.get("options"),
                         "deadline": deadline_text, "multi": multi,
                         "anonymous": anonymous})))
@@ -344,6 +349,31 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     logger.info("투표 생성(폼) poll=%s 항목=%d 마감=%s",
                 poll.id, len(poll.options), parsing.format_deadline(poll.closes_at))
     return _ack("투표를 시작했습니다.")
+
+
+@app.on_card_action_execute(cards.VERB_CANCEL)
+async def handle_cancel(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
+    """잘못 부른 투표 만들기 폼을 지운다. 부른 사람만 할 수 있다."""
+    activity = ctx.activity
+    data = activity.value.action.data or {}
+    actor_id = activity.from_.id if activity.from_ else "unknown"
+    owner = data.get("c")
+    if owner and actor_id != owner:
+        return _ack("투표를 부른 사람만 취소할 수 있습니다.")
+
+    activities = ctx.api.conversations.activities(activity.conversation.id)
+    try:
+        await activities.delete(activity.reply_to_id)
+        logger.info("폼 취소 — 삭제 user=%s", _who(actor_id))
+    except Exception as exc:
+        # 지우지 못하면 적어도 폼을 못 쓰게 바꿔 둔다.
+        logger.warning("폼 삭제 실패, 취소 표시로 대신함 user=%s: %r", _who(actor_id), exc)
+        try:
+            await activities.update(activity.reply_to_id, MessageActivityInput().add_card(
+                cards.notice_card("🗑️ 취소된 투표 만들기입니다.")))
+        except Exception:
+            logger.exception("취소 표시도 실패")
+    return _ack("취소했습니다.")
 
 
 @app.on_card_action_execute(cards.VERB_VOTE)

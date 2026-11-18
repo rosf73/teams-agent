@@ -33,12 +33,14 @@ ACTION_VOTE = "vote"
 ACTION_CLOSE = "close"
 ACTION_CREATE = "create"
 ACTION_MINE = "mine"
+ACTION_CANCEL = "cancel"
 
 # 이전 이름 호환
 VERB_VOTE = ACTION_VOTE
 VERB_CLOSE = ACTION_CLOSE
 VERB_CREATE = ACTION_CREATE
 VERB_MINE = ACTION_MINE
+VERB_CANCEL = ACTION_CANCEL
 
 
 def _action(name: str, **payload) -> dict:
@@ -152,13 +154,18 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
 
 
 def form_card(creator_name: str, error: str | None = None,
-              values: dict | None = None, note: str | None = None) -> C.AdaptiveCard:
-    """생성 폼. 제출되면 이 카드가 그대로 투표판으로 바뀐다."""
+              values: dict | None = None, note: str | None = None,
+              creator_id: str | None = None) -> C.AdaptiveCard:
+    """생성 폼. 제출되면 이 카드가 그대로 투표판으로 바뀐다.
+
+    폼은 DB 에 없다. 그래서 부른 사람의 id 를 버튼 data(`c`)에 실어 두고, 누른 사람과
+    비교해 부른 사람만 제출·취소하게 한다. Teams 는 카드에 실린 data 를 그대로 돌려준다.
+    """
     values = values or {}
     body: list = [
         C.TextBlock(text="📊 **투표 만들기**", size="Large", weight="Bolder", wrap=True),
         C.TextBlock(text=f"{short_name(creator_name)} 님이 만드는 중입니다. "
-                         "만든 사람만 제출할 수 있습니다.",
+                         "만든 사람만 제출하거나 취소할 수 있습니다.",
                     size="Small", is_subtle=True, wrap=True, spacing="None"),
     ]
     if error:
@@ -188,9 +195,13 @@ def form_card(creator_name: str, error: str | None = None,
                       value="true" if values.get("anonymous") else "false"),
     ]
 
+    owner = {"c": creator_id} if creator_id else {}
     return C.AdaptiveCard(body=body, actions=[
         C.ExecuteAction(title="투표 시작", verb=ACTION_CREATE, style="positive",
-                        data=_action(ACTION_CREATE), associated_inputs="auto"),
+                        data=_action(ACTION_CREATE, **owner), associated_inputs="auto"),
+        # 잘못 불렀을 때 메시지를 지운다. 입력을 보내지 않아야 필수 칸이 비어 있어도 눌린다.
+        C.ExecuteAction(title="취소", verb=ACTION_CANCEL, style="destructive",
+                        data=_action(ACTION_CANCEL, **owner), associated_inputs="none"),
     ])
 
 
