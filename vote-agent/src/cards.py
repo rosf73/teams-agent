@@ -34,6 +34,7 @@ ACTION_CLOSE = "close"
 ACTION_CREATE = "create"
 ACTION_MINE = "mine"
 ACTION_CANCEL = "cancel"
+ACTION_NUDGE = "nudge"
 
 # 이전 이름 호환
 VERB_VOTE = ACTION_VOTE
@@ -41,6 +42,7 @@ VERB_CLOSE = ACTION_CLOSE
 VERB_CREATE = ACTION_CREATE
 VERB_MINE = ACTION_MINE
 VERB_CANCEL = ACTION_CANCEL
+VERB_NUDGE = ACTION_NUDGE
 
 
 def _action(name: str, **payload) -> dict:
@@ -149,6 +151,10 @@ def poll_card(poll: Poll) -> C.AdaptiveCard:
             title="투표 마감하기", verb=ACTION_CLOSE,
             data=_action(ACTION_CLOSE, p=poll.id),
             style="destructive", mode="secondary"))
+        # 만든 사람만 쓸 수 있다(핸들러가 확인한다). 미투표자를 채팅방에서 멘션한다.
+        actions.append(C.ExecuteAction(
+            title="투표 종용하기", verb=ACTION_NUDGE,
+            data=_action(ACTION_NUDGE, p=poll.id), mode="secondary"))
 
     return C.AdaptiveCard(body=body, actions=actions)
 
@@ -193,6 +199,9 @@ def form_card(creator_name: str, error: str | None = None,
                       value="true" if values.get("multi") else "false"),
         C.ToggleInput(id="anonymous", title="익명 투표 (투표한 사람 이름을 숨깁니다)",
                       value="true" if values.get("anonymous") else "false"),
+        # 익명 투표에서는 무시한다. 누가 안 했는지 드러내지 않기 위해서다.
+        C.ToggleInput(id="remind", title="종료 1시간전 미투표자알림",
+                      value="true" if values.get("remind") else "false"),
     ]
 
     owner = {"c": creator_id} if creator_id else {}

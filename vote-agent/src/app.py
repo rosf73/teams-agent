@@ -20,6 +20,7 @@ from collections import OrderedDict
 
 import cards
 import compat
+import nudge
 import parsing
 from config import Config
 from microsoft_teams.api import (
@@ -312,6 +313,7 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     deadline_text = str(data.get("deadline") or "").strip()
     multi = str(data.get("multi") or "").lower() == "true"
     anonymous = str(data.get("anonymous") or "").lower() == "true"
+    remind = str(data.get("remind") or "").lower() == "true"
 
     if not title:
         problem = "제목을 적어주세요."
@@ -323,6 +325,8 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
     closes_at = None
     if not problem:
         closes_at, problem = parsing.parse_deadline(deadline_text)
+    if not problem and remind and not anonymous and closes_at is None:
+        problem = "마감 시간을 정해야 미투표자 알림을 보낼 수 있습니다."
 
     if problem:
         # 폼을 유지하고 오류만 얹는다. 입력한 값은 보존한다.
@@ -332,23 +336,121 @@ async def handle_create(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
                 creator_name, error=problem, creator_id=creator_id,
                 values={"title": title, "options": data.get("options"),
                         "deadline": deadline_text, "multi": multi,
-                        "anonymous": anonymous})))
+                        "anonymous": anonymous, "remind": remind})))
         return _ack(problem)
 
     poll = store.create_poll(
         conversation_id=activity.conversation.id, service_url=activity.service_url,
         creator_id=creator_id, creator_name=creator_name,
         title=title, options=options, multi_select=multi, closes_at=closes_at,
-        anonymous=anonymous)
+        anonymous=anonymous, remind=remind)
     # 폼 카드가 붙어 있던 그 메시지를 투표판으로 바꾼다. 새 메시지를 만들지 않는다.
     store.set_activity_id(poll.id, activity.reply_to_id)
     poll = store.get_poll(poll.id) or poll
 
     await _repaint(ctx, poll)
     _schedule_close(ctx, poll)
-    logger.info("투표 생성(폼) poll=%s 항목=%d 마감=%s",
-                poll.id, len(poll.options), parsing.format_deadline(poll.closes_at))
+    logger.info("투표 생성(폼) poll=%s 항목=%d 마감=%s 알림=%s",
+                poll.id, len(poll.options), parsing.format_deadline(poll.closes_at), poll.remind)
+    # 마감까지 1시간 이하면 주기 확인을 기다리지 않고 바로 알린다.
+    if poll.remind and nudge.is_due(poll.closes_at, now()):
+        await _auto_remind(poll, ctx.api, ctx.send)
     return _ack("투표를 시작했습니다.")
+
+
+# ── 미투표자 알림 ──────────────────────────────────────────────────
+REMINDER_SWEEP_SECONDS = 60
+
+
+async def _non_voters(api, poll: Poll) -> list:
+    members = await api.conversations.get_members(poll.conversation_id)
+    return nudge.non_voters(members, store.voter_ids(poll.id))
+
+
+async def _auto_remind(poll: Poll, api, send) -> None:
+    """마감 1시간 전 자동 알림. 한 투표에 한 번만 보낸다.
+
+    보내기 **전에** 기록한다. 그래서 전송이 실패해도 다시 보내지 않는다.
+    같은 사람들을 두 번 멘션하는 것보다 한 번 빠지는 쪽이 낫다.
+    """
+    if not store.mark_reminded(poll.id):
+        return
+    try:
+        people = await _non_voters(api, poll)
+    except Exception as exc:
+        logger.warning("자동 알림 — 명단 조회 실패 poll=%s %s: %s", poll.id, type(exc).__name__, exc)
+        return
+    if not people:
+        logger.info("자동 알림 — 모두 투표해서 보내지 않음 poll=%s", poll.id)
+        return
+    try:
+        await send(nudge.auto_message(poll.activity_id, people))
+    except Exception as exc:
+        logger.warning("자동 알림 — 전송 실패 poll=%s %s: %s", poll.id, type(exc).__name__, exc)
+        return
+    logger.info("자동 알림 poll=%s 미투표=%d명", poll.id, len(people))
+
+
+def _proactive(poll: Poll):
+    """활동 컨텍스트 없이 보낼 때 쓰는 (api, send). 테스트에서 바꿔 끼운다."""
+    api = app.api.from_service_url(poll.service_url) if poll.service_url else app.api
+
+    async def send(msg):
+        return await app.send(poll.conversation_id, msg, service_url=poll.service_url)
+    return api, send
+
+
+async def _sweep_reminders(at=None) -> None:
+    """알림 시각이 된 투표에 자동 알림을 보낸다. 재시작해도 DB 에서 다시 찾는다."""
+    for poll in store.due_reminders(at):
+        async with _lock(poll.id):
+            fresh = store.get_poll(poll.id)
+            if fresh is None or fresh.closed:
+                continue
+            api, send = _proactive(fresh)
+            await _auto_remind(fresh, api, send)
+
+
+async def _reminder_loop() -> None:
+    while True:
+        try:
+            await _sweep_reminders()
+        except Exception:
+            logger.exception("자동 알림 확인 실패")
+        await asyncio.sleep(REMINDER_SWEEP_SECONDS)
+
+
+@app.on_card_action_execute(cards.VERB_NUDGE)
+async def handle_nudge(ctx: ActivityContext[AdaptiveCardInvokeActivity]):
+    """만든 사람이 누르는 '투표 종용하기'. 그 시점의 미투표자를 멘션한다."""
+    activity = ctx.activity
+    poll_id = str((activity.value.action.data or {}).get("p") or "")
+    actor_id = activity.from_.id if activity.from_ else "unknown"
+
+    poll = store.get_poll(poll_id)
+    if poll is None:
+        return _ack("이 투표를 찾을 수 없습니다.")
+    poll = await _close_if_expired(ctx, poll)
+    if poll.closed:
+        _schedule_repaint(ctx, poll.id)   # 지연 검사로 방금 닫혔으면 마감판으로 바꾼다
+        return _ack("이미 마감되었습니다.")
+    if actor_id != poll.creator_id:
+        return _ack(f"만든 사람({cards.short_name(poll.creator_name)})만 투표를 종용할 수 있습니다.")
+
+    try:
+        people = await _non_voters(ctx.api, poll)
+    except Exception as exc:
+        logger.warning("종용 — 명단 조회 실패 poll=%s %s: %s", poll.id, type(exc).__name__, exc)
+        return _ack("참여자 명단을 가져오지 못했습니다.")
+    if not people:
+        return _ack("모두 투표했습니다.")
+    try:
+        await ctx.send(nudge.nudge_message(poll.activity_id, people, poll.anonymous))
+    except Exception as exc:
+        logger.warning("종용 — 전송 실패 poll=%s %s: %s", poll.id, type(exc).__name__, exc)
+        return _ack("알림을 보내지 못했습니다.")
+    logger.info("종용 poll=%s 미투표=%d명 익명=%s", poll.id, len(people), poll.anonymous)
+    return _ack(f"미투표자 {len(people)}명에게 알렸습니다.")
 
 
 @app.on_card_action_execute(cards.VERB_CANCEL)
@@ -474,4 +576,10 @@ if __name__ == "__main__":
         logger.info("보존정책 정리 — 마감 %d건, 방치 %d건 삭제", purged_closed, purged_stale)
     logger.info("DB 현황 %s", store.counts())
 
-    asyncio.run(app.start())
+    async def main() -> None:
+        # 알림 확인은 앱이 준비된 뒤에 시작한다. app.send 는 initialize 전에 부르면 실패한다.
+        await app.initialize()
+        reminders = asyncio.create_task(_reminder_loop())  # noqa: F841 — 프로세스와 수명이 같다
+        await app.start()
+
+    asyncio.run(main())

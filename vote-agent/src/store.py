@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS polls (
     title           TEXT NOT NULL,
     multi_select    INTEGER NOT NULL DEFAULT 0,
     anonymous       INTEGER NOT NULL DEFAULT 0,
+    remind          INTEGER NOT NULL DEFAULT 0,
+    reminded_at     TEXT,
     closes_at       TEXT,
     closed_at       TEXT,
     created_at      TEXT NOT NULL
@@ -102,6 +104,10 @@ class Poll:
     created_at: datetime
     # 익명이면 카드에 투표자 이름을 보여주지 않는다. 중복 투표를 막으려고 DB 에는 그대로 남긴다.
     anonymous: bool = False
+    # 마감 1시간 전 미투표자 자동 알림. 익명 투표는 항상 꺼진다.
+    remind: bool = False
+    # 자동 알림을 처리한 시각. 보내기 전에 기록하므로 실패해도 다시 보내지 않는다.
+    reminded_at: datetime | None = None
     options: list[Option] = field(default_factory=list)
 
     @property
@@ -145,6 +151,12 @@ class Store:
             # 2026-10-19 추가. 기존 투표는 실명(0)으로 남는다.
             self._conn.execute(
                 "ALTER TABLE polls ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0")
+        if "remind" not in columns:
+            # 2026-11-19 추가. 기존 투표는 자동 알림 없음(0)으로 남는다.
+            self._conn.execute(
+                "ALTER TABLE polls ADD COLUMN remind INTEGER NOT NULL DEFAULT 0")
+        if "reminded_at" not in columns:
+            self._conn.execute("ALTER TABLE polls ADD COLUMN reminded_at TEXT")
 
     def close(self) -> None:
         self._conn.close()
@@ -153,16 +165,20 @@ class Store:
     def create_poll(self, *, conversation_id: str, service_url: str | None,
                     creator_id: str, creator_name: str, title: str,
                     options: list[str], multi_select: bool,
-                    closes_at: datetime | None, anonymous: bool = False) -> Poll:
+                    closes_at: datetime | None, anonymous: bool = False,
+                    remind: bool = False) -> Poll:
         poll_id = secrets.token_hex(6)
         created = now()
         with self._conn:
             self._conn.execute(
                 "INSERT INTO polls (id, conversation_id, activity_id, service_url,"
-                " creator_id, creator_name, title, multi_select, anonymous, closes_at, closed_at,"
-                " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " creator_id, creator_name, title, multi_select, anonymous, remind, closes_at,"
+                " closed_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (poll_id, conversation_id, None, service_url, creator_id, creator_name,
-                 title, int(multi_select), int(anonymous), _iso(closes_at), None, _iso(created)))
+                 title, int(multi_select), int(anonymous),
+                 # 익명 투표는 누가 안 했는지 드러내지 않는다. 마감이 없으면 알릴 때가 없다.
+                 int(remind and not anonymous and closes_at is not None),
+                 _iso(closes_at), None, _iso(created)))
             self._conn.executemany(
                 "INSERT INTO poll_options (poll_id, idx, label) VALUES (?,?,?)",
                 [(poll_id, i, label) for i, label in enumerate(options)])
@@ -184,6 +200,7 @@ class Store:
             creator_id=row["creator_id"], creator_name=row["creator_name"],
             title=row["title"], multi_select=bool(row["multi_select"]),
             anonymous=bool(row["anonymous"]),
+            remind=bool(row["remind"]), reminded_at=_parse(row["reminded_at"]),
             closes_at=_parse(row["closes_at"]), closed_at=_parse(row["closed_at"]),
             created_at=_parse(row["created_at"]),  # type: ignore[arg-type]
         )
@@ -204,6 +221,30 @@ class Store:
         rows = self._conn.execute(
             "SELECT id FROM polls WHERE closed_at IS NULL ORDER BY created_at").fetchall()
         return [p for p in (self.get_poll(r["id"]) for r in rows) if p]
+
+    def due_reminders(self, at: datetime | None = None) -> list[Poll]:
+        """자동 알림을 보낼 때가 된 열린 투표. 마감이 지난 투표는 넣지 않는다."""
+        from nudge import is_due  # nudge 가 store 를 모르게 둔다
+
+        current = at or now()
+        rows = self._conn.execute(
+            "SELECT id FROM polls WHERE closed_at IS NULL AND remind = 1"
+            " AND reminded_at IS NULL AND closes_at IS NOT NULL ORDER BY closes_at").fetchall()
+        polls = [p for p in (self.get_poll(r["id"]) for r in rows) if p]
+        return [p for p in polls if is_due(p.closes_at, current)]
+
+    def mark_reminded(self, poll_id: str, at: datetime | None = None) -> bool:
+        """자동 알림을 맡는다. 이미 누가 맡았으면 False. 같은 알림을 두 번 보내지 않는다."""
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE polls SET reminded_at = ? WHERE id = ? AND reminded_at IS NULL",
+                (_iso(at or now()), poll_id))
+        return cur.rowcount > 0
+
+    def voter_ids(self, poll_id: str) -> set[str]:
+        """한 표라도 넣은 사람의 id."""
+        return {r["user_id"] for r in self._conn.execute(
+            "SELECT DISTINCT user_id FROM votes WHERE poll_id = ?", (poll_id,))}
 
     # ── 투표 ──────────────────────────────────────────────────────
     def toggle_vote(self, poll: Poll, option_idx: int, user_id: str,

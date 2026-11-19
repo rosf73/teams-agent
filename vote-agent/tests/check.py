@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ["VOTE_DB_PATH"] = os.path.join(tempfile.mkdtemp(), "check.db")
 
 from microsoft_teams.api import (  # noqa: E402
-    AdaptiveCardInvokeActivity, MessageActivity,
+    AdaptiveCardInvokeActivity, MessageActivity, TeamsChannelAccount,
 )
 from microsoft_teams.api.activities.sent_activity import SentActivity  # noqa: E402
 
@@ -89,6 +89,10 @@ class FakeContext:
         self.activity = activity
         self.calls: list[tuple[str, str, object]] = []
         self.delete_error: Exception | None = None
+        self.members_error: Exception | None = None
+        # 채팅방 명단. 봇 자신도 들어 있다 (실제 API 도 그렇다).
+        self.roster = [TeamsChannelAccount(id=BOT["id"], name=BOT["name"])] + [
+            TeamsChannelAccount(id=i, name=n) for i, n in PEOPLE.values()]
         outer = self
 
         class Activities:
@@ -101,8 +105,14 @@ class FakeContext:
                 if outer.delete_error:
                     raise outer.delete_error
 
+        async def get_members(conversation_id):
+            if outer.members_error:
+                raise outer.members_error
+            return list(outer.roster)
+
         self.api = type("Api", (), {"conversations": type("Conv", (), {
             "activities": staticmethod(lambda cid: Activities()),
+            "get_members": staticmethod(get_members),
         })()})()
 
     async def send(self, msg):
@@ -470,8 +480,8 @@ def test_cards() -> None:
     check("투표자 이름 (짧은 이름)", "더미1, 테스터3" in text)
     check("긴 표시명 축약", "(Foxtrot Dummy)" not in text)
     check("0표는 —", "—" in text)
-    check("투표 버튼 3개 + 마감", [a[1] for a in actions] ==
-          ["vote", "vote", "vote", "close"], str(actions))
+    check("투표 버튼 3개 + 마감 + 종용", [a[1] for a in actions] ==
+          ["vote", "vote", "vote", "close", "nudge"], str(actions))
     check("만든 사람 표시", "만든 사람 샘플2" in text)
     check("@태그 없음 (카드에 mention 엔터티 불가)", "<at>" not in text)
 
@@ -908,10 +918,12 @@ def test_compat() -> None:
 
     client = TestClient(adapter.app)
 
+    # 2.1.0 부터 SDK 가 upgrade 를 안다. 그래서 SDK 가 모르는 값으로 우회를 검사한다.
+    unknown = "upgrade" if "upgrade" not in compat.SUPPORTED_INSTALL_ACTIONS else "futureAction"
     downstream.clear()
     r = client.post(compat.MESSAGING_PATH,
-                    json={"type": "installationUpdate", "action": "upgrade"})
-    check("action=upgrade → 200 이고 SDK 까지 가지 않는다",
+                    json={"type": "installationUpdate", "action": unknown})
+    check(f"모르는 action({unknown}) → 200 이고 SDK 까지 가지 않는다",
           r.status_code == 200 and not downstream, f"{r.status_code} / {len(downstream)}건")
 
     downstream.clear()
@@ -1252,7 +1264,7 @@ async def test_my_choice() -> None:
     board = ctx.cards()[0]
     poll_id = action_data(board.actions[0]).get("p")
     check("실명 투표에는 내 선택 보기 버튼이 없다",
-          [a[1] for a in card_actions(board)] == ["vote", "vote", "vote", "close"],
+          [a[1] for a in card_actions(board)] == ["vote", "vote", "vote", "close", "nudge"],
           str(card_actions(board)))
 
     _, r1 = await route(app, FakeContext(invoke_from_card(board, 0, who="alice")))
@@ -1281,9 +1293,10 @@ async def test_my_choice() -> None:
     aboard = anon.cards()[0]
     apoll = action_data(aboard.actions[0]).get("p")
     acts = card_actions(aboard)
-    check("버튼 순서: 항목들 → ★ 내 선택 보기 → 마감",
+    check("버튼 순서: 항목들 → ★ 내 선택 보기 → 마감 → 종용",
           acts == [("좋음", "vote"), ("보통", "vote"), ("나쁨", "vote"),
-                   ("★ 내 선택 보기", "mine"), ("투표 마감하기", "close")], str(acts))
+                   ("★ 내 선택 보기", "mine"), ("투표 마감하기", "close"),
+                   ("투표 종용하기", "nudge")], str(acts))
     mine_action = aboard.actions[3]
     check("내 선택 보기는 바깥(…메뉴가 아님)",
           getattr(mine_action, "mode", None) in (None, "primary"),
@@ -1323,6 +1336,245 @@ async def test_my_choice() -> None:
             app._timers[pid].cancel()
 
 
+# ═══════════════════════════════════════════════════════════════════
+def _mentioned(msg) -> list[str]:
+    return [e.mentioned.id for e in (msg.entities or []) if type(e).__name__ == "MentionEntity"]
+
+
+def _quoted_id(msg) -> str | None:
+    for e in (msg.entities or []):
+        if type(e).__name__ == "QuotedReplyEntity":
+            return e.quoted_reply.message_id
+    return None
+
+
+def test_reminder_store_cards() -> None:
+    import sqlite3
+    import nudge
+    from store import Store
+
+    section("미투표자 알림 — 저장·카드·메시지")
+    s = Store(":memory:")
+    base = dict(conversation_id=CONVERSATION, service_url=SERVICE_URL,
+                creator_id=PEOPLE["owner"][0], creator_name=PEOPLE["owner"][1],
+                title="t", options=["a", "b"], multi_select=False)
+    soon = datetime.now(timezone.utc) + timedelta(hours=3)
+    on = s.create_poll(**base, closes_at=soon, remind=True)
+    check("알림을 켜면 저장된다", on.remind and on.reminded_at is None)
+    check("익명 투표는 알림이 꺼진다",
+          not s.create_poll(**base, closes_at=soon, anonymous=True, remind=True).remind)
+    check("마감이 없으면 알림이 꺼진다", not s.create_poll(**base, closes_at=None, remind=True).remind)
+
+    check("마감 1시간 전보다 이르면 대상이 아니다", on.id not in
+          [p.id for p in s.due_reminders(soon - timedelta(hours=1, minutes=1))])
+    check("마감 1시간 전이 되면 대상이다", on.id in
+          [p.id for p in s.due_reminders(soon - timedelta(hours=1))])
+    check("마감이 지나면 대상이 아니다", on.id not in [p.id for p in s.due_reminders(soon)])
+    check("처음 맡으면 True", s.mark_reminded(on.id))
+    check("두 번째는 False (중복 방지)", not s.mark_reminded(on.id))
+    check("맡은 뒤에는 대상이 아니다", on.id not in
+          [p.id for p in s.due_reminders(soon - timedelta(minutes=30))])
+
+    s.toggle_vote(on, 0, PEOPLE["alice"][0], PEOPLE["alice"][1])
+    s.toggle_vote(s.get_poll(on.id), 1, PEOPLE["alice"][0], PEOPLE["alice"][1])
+    check("voter_ids 는 사람 단위", s.voter_ids(on.id) == {PEOPLE["alice"][0]})
+    s.close()
+
+    path = os.path.join(tempfile.mkdtemp(), "old.db")
+    old = sqlite3.connect(path)
+    old.executescript("""CREATE TABLE polls (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+        activity_id TEXT, service_url TEXT, creator_id TEXT NOT NULL, creator_name TEXT NOT NULL,
+        title TEXT NOT NULL, multi_select INTEGER NOT NULL DEFAULT 0,
+        anonymous INTEGER NOT NULL DEFAULT 0, closes_at TEXT, closed_at TEXT, created_at TEXT NOT NULL);
+        INSERT INTO polls VALUES ('old1','c',NULL,NULL,'u','n','t',0,0,NULL,NULL,'2026-11-01T00:00:00+00:00');""")
+    old.commit()
+    old.close()
+    migrated = Store(path)
+    p = migrated.get_poll("old1")
+    check("예전 DB 에 칸을 추가하고 기존 투표는 알림 없음", p is not None and not p.remind)
+    migrated.close()
+
+    members = [TeamsChannelAccount(id=BOT["id"], name=BOT["name"]),
+               TeamsChannelAccount(id="28:other-bot", name="당첨자뽑기"),
+               TeamsChannelAccount(id="29:a", name="홍길동"),
+               TeamsChannelAccount(id="29:b", name="김민지")]
+    people = nudge.non_voters(members, {"29:a"})
+    check("미투표자 — 봇과 투표한 사람을 뺀다", [a.id for a in people] == ["29:b"],
+          str([a.id for a in people]))
+
+    two = [nudge.Account(id="29:a", name="홍길동"), nudge.Account(id="29:b", name="김민지")]
+    auto = nudge.auto_message("card-x", two)
+    check("자동 알림 문구", auto.text == '<quoted messageId="card-x"/> 투표가 종료되기까지 '
+          '1시간도 남지 않았어요!\n\n<at>홍길동</at> <at>김민지</at> 마감 전에 투표해주세요', auto.text)
+    check("자동 알림 — 멘션과 인용", _mentioned(auto) == ["29:a", "29:b"]
+          and _quoted_id(auto) == "card-x")
+    named = nudge.nudge_message("card-x", two, anonymous=False)
+    check("종용 문구 (실명)", named.text.endswith(
+        "<at>홍길동</at> <at>김민지</at> 마감되기 전에 투표를 완료해주세요!"), named.text)
+    anon = nudge.nudge_message("card-x", two, anonymous=True)
+    check("종용 문구 (익명) — 사람 수만, 멘션 없음",
+          anon.text.endswith("미투표자는 2명입니다. 마감되기 전에 투표를 완료해주세요!")
+          and not _mentioned(anon) and _quoted_id(anon) == "card-x", anon.text)
+
+    form = cards.form_card(PEOPLE["owner"][1])
+    ids = [getattr(i, "id", None) for i in form.body]
+    check("폼 — 익명 아래에 알림 체크박스",
+          ids.index("remind") == ids.index("anonymous") + 1, str(ids))
+    toggle = form.body[ids.index("remind")]
+    check("폼 — 체크박스 문구", toggle.title == "종료 1시간전 미투표자알림", toggle.title)
+
+    t = Store(":memory:")
+    open_poll = t.create_poll(**base, closes_at=None)
+    acts = card_actions(cards.poll_card(open_poll))
+    check("투표판 — 마감하기 바로 아래 종용하기",
+          acts[-2:] == [("투표 마감하기", "close"), ("투표 종용하기", "nudge")], str(acts))
+    nudge_btn = cards.poll_card(open_poll).actions[-1]
+    check("종용하기는 … 메뉴(secondary)", nudge_btn.mode == "secondary")
+    t.close_poll(open_poll.id)
+    check("마감판에는 종용하기가 없다",
+          ("투표 종용하기", "nudge") not in card_actions(cards.poll_card(t.get_poll(open_poll.id))))
+    t.close()
+
+
+async def test_reminder_handler() -> None:
+    import app
+
+    section("미투표자 알림 — 폼 생성")
+
+    async def submit(deadline: str, remind: str, anonymous: str = "false", title: str = "점심"):
+        form_ctx = FakeContext(message(""))
+        await app.handle_message(form_ctx)
+        form_id = form_ctx.calls[0][1]
+        ctx = FakeContext(invoke("create", {
+            "action": "create", "c": PEOPLE["owner"][0], "title": title, "options": "참\n불참",
+            "deadline": deadline, "multi": "false", "anonymous": anonymous, "remind": remind},
+            reply_to=form_id))
+        _, result = await route(app, ctx)
+        return ctx, result, form_id
+
+    def poll_of(ctx):
+        return app.store.get_poll(action_data(ctx.cards()[-1].actions[0]).get("p"))
+
+    ctx, result, _ = await submit("", "true")
+    check("알림 + 마감 없음 → 폼 오류",
+          result.value == "마감 시간을 정해야 미투표자 알림을 보낼 수 있습니다.", result.value)
+    kept = {getattr(i, "id", None): getattr(i, "value", None) for i in ctx.cards()[0].body}
+    check("폼 오류 때 알림 체크가 유지된다", kept.get("remind") == "true", str(kept))
+
+    ctx, result, _ = await submit("", "true", anonymous="true")
+    check("익명 + 알림 + 마감 없음 → 오류 없이 생성 (체크 무시)",
+          result.value == "투표를 시작했습니다.", result.value)
+
+    ctx, result, form_id = await submit("30분", "true")
+    sends = [m for k, _, m in ctx.calls if k == "SEND"]
+    check("1시간 이하 마감 → 바로 알림 1건", len(sends) == 1, str(len(sends)))
+    if sends:
+        check("바로 알림 — 투표 카드를 인용", _quoted_id(sends[0]) == form_id)
+        check("바로 알림 — 사람 전원 멘션, 봇 제외",
+              _mentioned(sends[0]) == [i for i, _ in PEOPLE.values()], str(_mentioned(sends[0])))
+    check("바로 알림 후 처리 시각 기록", poll_of(ctx).reminded_at is not None)
+
+    ctx, result, _ = await submit("30분", "true", anonymous="true")
+    check("익명 + 1시간 이하 → 알림 없음", not [k for k, _, _ in ctx.calls if k == "SEND"])
+
+    section("미투표자 알림 — 주기 확인")
+    ctx, result, form_id = await submit("3시간", "true", title="회식")
+    check("3시간 마감 → 바로 보내지 않는다", not [k for k, _, _ in ctx.calls if k == "SEND"])
+    poll = poll_of(ctx)
+    app.store.toggle_vote(poll, 0, PEOPLE["alice"][0], PEOPLE["alice"][1])
+
+    sent: list = []
+    proactive = FakeContext(invoke("noop", {}))
+    original = app._proactive
+
+    async def fake_send(msg):
+        sent.append(msg)
+
+    app._proactive = lambda p: (proactive.api, fake_send)
+    try:
+        await app._sweep_reminders(poll.closes_at - timedelta(hours=2))
+        check("알림 시각 전에는 보내지 않는다", not sent)
+        await app._sweep_reminders(poll.closes_at - timedelta(minutes=59))
+        check("알림 시각이 되면 1건", len(sent) == 1, str(len(sent)))
+        if sent:
+            check("투표한 사람은 멘션하지 않는다",
+                  _mentioned(sent[0]) == [PEOPLE["owner"][0], PEOPLE["bob"][0]],
+                  str(_mentioned(sent[0])))
+            check("주기 확인 알림도 카드를 인용", _quoted_id(sent[0]) == form_id)
+        await app._sweep_reminders(poll.closes_at - timedelta(minutes=58))
+        check("다시 확인해도 또 보내지 않는다", len(sent) == 1)
+
+        ctx, _, _ = await submit("3시간", "true", title="마감된 투표")
+        closed = poll_of(ctx)
+        app.store.close_poll(closed.id)
+        await app._sweep_reminders(closed.closes_at - timedelta(minutes=30))
+        check("마감된 투표에는 보내지 않는다", len(sent) == 1)
+
+        ctx, _, _ = await submit("3시간", "true", title="명단 실패")
+        fail_poll = poll_of(ctx)
+        proactive.members_error = RuntimeError("403")
+        await app._sweep_reminders(fail_poll.closes_at - timedelta(minutes=30))
+        check("명단 조회가 실패해도 죽지 않고, 다시 시도하지 않는다",
+              len(sent) == 1 and app.store.get_poll(fail_poll.id).reminded_at is not None)
+    finally:
+        app._proactive = original
+
+    section("미투표자 알림 — 투표 종용하기")
+    ctx, _, form_id = await submit("", "false", title="종용 테스트")
+    board = ctx.cards()[-1]
+    pid = action_data(board.actions[0]).get("p")
+    nudge_index = [t for t, _ in card_actions(board)].index("투표 종용하기")
+    check("종용 버튼 → 핸들러 1개 매칭",
+          len(app.app.router.select_handlers(invoke_from_card(board, nudge_index))) == 1)
+
+    other = FakeContext(invoke_from_card(board, nudge_index, who="alice", reply_to=form_id))
+    _, result = await route(app, other)
+    check("만든 사람만 종용할 수 있다",
+          result.value == "만든 사람(샘플2)만 투표를 종용할 수 있습니다."
+          and not [k for k, _, _ in other.calls if k == "SEND"], result.value)
+
+    app.store.toggle_vote(app.store.get_poll(pid), 0, PEOPLE["bob"][0], PEOPLE["bob"][1])
+    mine = FakeContext(invoke_from_card(board, nudge_index, reply_to=form_id))
+    _, result = await route(app, mine)
+    sends = [m for k, _, m in mine.calls if k == "SEND"]
+    check("종용 — 미투표자만 멘션",
+          len(sends) == 1 and _mentioned(sends[0]) == [PEOPLE["owner"][0], PEOPLE["alice"][0]],
+          str([_mentioned(m) for m in sends]))
+    check("종용 — 카드를 인용", bool(sends) and _quoted_id(sends[0]) == form_id)
+    check("종용 — 누른 사람에게 결과", result.value == "미투표자 2명에게 알렸습니다.", result.value)
+
+    broken = FakeContext(invoke_from_card(board, nudge_index, reply_to=form_id))
+    broken.members_error = RuntimeError("timeout")
+    _, result = await route(app, broken)
+    check("명단 조회 실패 → 안내", result.value == "참여자 명단을 가져오지 못했습니다.", result.value)
+
+    for who in ("owner", "alice"):
+        app.store.toggle_vote(app.store.get_poll(pid), 1, *PEOPLE[who])
+    done = FakeContext(invoke_from_card(board, nudge_index, reply_to=form_id))
+    _, result = await route(app, done)
+    check("모두 투표 → 채팅 없이 안내",
+          result.value == "모두 투표했습니다." and not [k for k, _, _ in done.calls if k == "SEND"],
+          result.value)
+
+    app.store.close_poll(pid)
+    late = FakeContext(invoke_from_card(board, nudge_index, reply_to=form_id))
+    _, result = await route(app, late)
+    check("마감 후 종용 → 거절", result.value == "이미 마감되었습니다.", result.value)
+
+    ctx, _, form_id = await submit("", "false", anonymous="true", title="익명 종용")
+    board = ctx.cards()[-1]
+    idx = [t for t, _ in card_actions(board)].index("투표 종용하기")
+    anon = FakeContext(invoke_from_card(board, idx, reply_to=form_id))
+    _, result = await route(app, anon)
+    sends = [m for k, _, m in anon.calls if k == "SEND"]
+    check("익명 종용 — 사람 수만, 멘션 없음",
+          len(sends) == 1 and not _mentioned(sends[0])
+          and "미투표자는 3명입니다." in sends[0].text, sends[0].text if sends else "")
+
+    for t in list(app._timers.values()):
+        t.cancel()
+
+
 async def main() -> int:
     print("vote-agent 검증\n")
     import app
@@ -1339,6 +1591,8 @@ async def main() -> int:
     await test_vote_resend()
     await test_vote_responds_before_repaint()
     await test_my_choice()
+    test_reminder_store_cards()
+    await test_reminder_handler()
     await test_concurrency()
     await test_timer()
     print(f"\n{'=' * 62}\n통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
